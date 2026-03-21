@@ -1,0 +1,39 @@
+# Mem0 Agent 配置模板
+# 复制此文件为 config.yaml 并填写实际值
+
+# ============ 向量数据库配置 ============
+qdrant:
+  host: localhost
+  port: 6333
+
+# ============ LLM API 配置 ============
+llm:
+  # API 地址
+  api_base_url: "https://api.siliconflow.cn/v1"
+  # API Key（注意保密）
+  api_key: "your-api-key-here"
+  # 模型名称
+  model: "Qwen/Qwen2.5-7B-Instruct"
+
+# ============ Embedding 配置 ============
+embedding:
+  # Embedding 模型
+  model: "BAAI/bge-large-zh-v1.5"
+  # 向量维度
+  dimensions: 1024
+
+# ============ Agent 配置 ============
+agent:
+  # Agent ID（用于区分不同 agent）
+  id: "main"
+  # User ID（用于区分不同用户）
+  user_id: "your-user-id"
+  # Collection 名称
+  collection: "mem0_main"
+
+# ============ 监听配置 ============
+watch:
+  # 检查间隔（毫秒）
+  interval: 5000
+  # sessions 目录路径
+  sessions_dir: "/root/.openclaw/agents/main/sessions"
