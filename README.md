@@ -21,6 +21,18 @@ Mem0 Agent Setup = **Mem0 + Qdrant + 自动化部署**
 
 > 本项目基于 [Mem0](https://github.com/mem0ai/mem0) 开发，采用**本地部署**方案，所有数据存储在你的 Qdrant 向量数据库中，**隐私安全可控**。
 
+## ⚠️ 前置要求
+
+使用本项目前，你需要准备：
+
+| 资源 | 说明 | 获取方式 |
+|------|------|---------|
+| **LLM API** | 用于语义理解和生成 | [SiliconFlow](https://siliconflow.cn) / [OpenAI](https://platform.openai.com) |
+| **Embedding API** | 用于将文本转为向量 | 同上（可用同一服务商） |
+| **Qdrant** | 向量数据库 | 本地 Docker 部署（install.sh 自动完成） |
+
+> 💡 **API 费用**：LLM + Embedding 组合使用，成本约 ¥1/天（1000条记忆）
+
 ```
 用户说"我最喜欢蓝色" → 自动存储到向量数据库
 用户下次问"有什么推荐" → 自动检索"蓝色偏好" → 个性化推荐
@@ -90,21 +102,25 @@ mem0-agent search "我的偏好"
 ### config.yaml 完整示例
 
 ```yaml
-# 向量数据库（Qdrant）
+# ═══════════════════════════════════════════════════════
+# 在这里修改 API 配置（config/config.yaml）
+# ═══════════════════════════════════════════════════════
+
+# 向量数据库（Qdrant）- 通常不需要改
 qdrant:
   host: localhost
   port: 6333
 
-# LLM API（SiliconFlow / OpenAI 等）
+# LLM API（⚠️ 在这里修改你的 API）
 llm:
-  api_base_url: "https://api.siliconflow.cn/v1"
-  api_key: "your-api-key"
-  model: "Qwen/Qwen2.5-7B-Instruct"
+  api_base_url: "https://api.siliconflow.cn/v1"  # 或 OpenAI: https://api.openai.com/v1
+  api_key: "sk-xxxxxxxxxxxxxxxx"                  # ⚠️ 填入你的 API Key
+  model: "Qwen/Qwen2.5-7B-Instruct"               # 或其他模型
 
-# Embedding 模型
+# Embedding 模型（⚠️ 在这里修改）
 embedding:
-  model: "BAAI/bge-large-zh-v1.5"
-  dimensions: 1024
+  model: "BAAI/bge-large-zh-v1.5"   # ⚠️ 填入你的 Embedding 模型
+  dimensions: 1024                    # 向量维度
 
 # Agent 配置
 agent:
