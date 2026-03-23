@@ -7,7 +7,12 @@ import os
 import sys
 import re
 
-os.environ['OPENAI_API_KEY'] = 'REMOVED_API_KEY'
+# 配置 API Key（必须设置环境变量）
+if 'OPENAI_API_KEY' not in os.environ:
+    raise RuntimeError("请设置环境变量 OPENAI_API_KEY")
+os.environ['OPENAI_API_KEY'] = os.environ['OPENAI_API_KEY']
+
+os.environ['OPENAI_BASE_URL'] = os.environ.get('OPENAI_BASE_URL', 'https://api.siliconflow.cn/v1')
 
 from mem0 import Memory
 from openai import OpenAI
@@ -114,7 +119,7 @@ def auto_recall(query: str, min_score: int = 2, mem_type: str = None, use_rerank
     for mem in parsed_memories:
         raw = mem.get("memory", "")
         parsed = parse_memory(raw)
-        lines.append(f"- [{parsed['type']} ⭐{parsed['score']}] {parsed['clean_text']}")
+        lines.append(f"- [{parsed['type']}][score:{parsed['score']}] {parsed['clean_text']}")
     
     return '\n'.join(lines)
 

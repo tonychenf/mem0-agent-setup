@@ -103,12 +103,21 @@ git clone https://github.com/tonychenf/mem0-agent-setup.git
 cd mem0-agent-setup
 ```
 
-### 2. 填写配置
+### 2. 配置环境变量
 
 ```bash
-cp config/config.yaml.example config/config.yaml
-# 编辑 config.yaml，填入你的配置
+# 复制配置模板
+cp scripts/config.env.example .env
+
+# 编辑 .env 文件，填入你的 API Key
+vim .env
+
+# 或者直接设置环境变量（推荐）
+export OPENAI_API_KEY="your-api-key-here"
+export OPENAI_BASE_URL="https://api.siliconflow.cn/v1"
 ```
+
+> ⚠️ **必须设置 `OPENAI_API_KEY`** 环境变量，否则脚本无法运行
 
 ### 3. 一键安装
 
@@ -144,39 +153,35 @@ mem0-agent search "我的偏好"
 
 ## 📖 配置说明
 
-### config.yaml 完整示例
+### 环境变量配置（必需）
 
-```yaml
-# ═══════════════════════════════════════════════════════
-# 在这里修改 API 配置（config/config.yaml）
-# ═══════════════════════════════════════════════════════
+```bash
+# 必需：LLM API Key
+export OPENAI_API_KEY="your-siliconflow-or-openai-api-key"
 
-# 向量数据库（Qdrant）- 通常不需要改
-qdrant:
-  host: localhost
-  port: 6333
+# 可选：API Base URL（默认使用 SiliconFlow）
+export OPENAI_BASE_URL="https://api.siliconflow.cn/v1"
 
-# LLM API（⚠️ 在这里修改你的 API）
-llm:
-  api_base_url: "https://api.siliconflow.cn/v1"  # 或 OpenAI: https://api.openai.com/v1
-  api_key: "sk-xxxxxxxxxxxxxxxx"                  # ⚠️ 填入你的 API Key
-  model: "Qwen/Qwen2.5-7B-Instruct"               # 或其他模型
-
-# Embedding 模型（⚠️ 在这里修改）
-embedding:
-  model: "BAAI/bge-large-zh-v1.5"   # ⚠️ 填入你的 Embedding 模型
-  dimensions: 1024                    # 向量维度
-
-# Agent 配置
-agent:
-  id: "main"           # Agent 标识
-  user_id: "user1"     # 用户标识
-  collection: "mem0_main"  # 记忆集合
-
-# 监听配置
-watch:
-  interval: 5000        # 检查间隔（毫秒）
+# 可选：Qdrant 地址（默认 localhost:6333）
+export QDRANT_HOST="localhost"
+export QDRANT_PORT="6333"
 ```
+
+### 多 Agent 配置
+
+每个 Agent 有独立的 systemd 服务和 collection，通过 agent_id 区分：
+
+| Agent | Collection | 说明 |
+|-------|------------|------|
+| main | mem0_main | 主 Agent |
+| capital | mem0_capital | 量化 Agent |
+| dev | mem0_dev | 开发 Agent |
+| ... | ... | 可扩展 |
+
+Agent 识别优先级：
+1. 环境变量 `AGENT_NAME`
+2. 工作目录路径（如 `/root/.openclaw/agents/capital/` → `capital`）
+3. 默认 `main`
 
 ## 🔍 配置重复检测
 
