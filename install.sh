@@ -272,7 +272,19 @@ check_scripts() {
     fi
 
     local SCRIPT_DIR=$(get_scripts_dir "$AGENT_ID")
+    local WORKSPACE_DIR=$(get_workspace_dir "$AGENT_ID")
+    local ENV_FILE="${WORKSPACE_DIR}/.env"
+
     mkdir -p "$SCRIPT_DIR"
+
+    # 复制配置模板（如果 .env 不存在）
+    if [ ! -f "$ENV_FILE" ]; then
+        if [ -f "scripts/config.env.example" ]; then
+            log_info "创建配置文件 $ENV_FILE..."
+            cp scripts/config.env.example "$ENV_FILE"
+            log_warn "请编辑 $ENV_FILE 填入你的 API Key！"
+        fi
+    fi
 
     if [ -f "$SCRIPT_DIR/watch_sessions.js" ] && [ -f "$SCRIPT_DIR/sync_to_mem0.py" ]; then
         log_skip "监听脚本已部署"
@@ -309,6 +321,7 @@ deploy_systemd_service() {
     local SERVICE_NAME="openclaw-session-watch"
     local SCRIPTS_DIR=$(get_scripts_dir "$agent_id")
     local WORKSPACE_DIR=$(get_workspace_dir "$agent_id")
+    local ENV_FILE="${WORKSPACE_DIR}/.env"
 
     if systemctl is-active --quiet ${SERVICE_NAME} 2>/dev/null; then
         log_skip "服务已运行: ${SERVICE_NAME}"
@@ -326,6 +339,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=${WORKSPACE_DIR}
+EnvironmentFile=${ENV_FILE}
 ExecStart=/usr/bin/node ${SCRIPTS_DIR}/watch_sessions.js ${agent_id}
 Restart=always
 RestartSec=10
@@ -413,6 +427,8 @@ uninstall() {
     
     SERVICE_NAME="openclaw-session-watch"
     local SCRIPTS_DIR=$(get_scripts_dir "$AGENT_ID")
+    local WORKSPACE_DIR=$(get_workspace_dir "$AGENT_ID")
+    local ENV_FILE="${WORKSPACE_DIR}/.env"
     
     systemctl stop ${SERVICE_NAME} 2>/dev/null || true
     systemctl disable ${SERVICE_NAME} 2>/dev/null || true
@@ -422,22 +438,25 @@ uninstall() {
     rm -f "$SCRIPTS_DIR/watch_sessions.js"
     rm -f "$SCRIPTS_DIR/sync_to_mem0.py"
     
+    # 删除配置文件（可选）
+    # rm -f "$ENV_FILE"
+    
     log_info "卸载完成"
 }
 
 # 卸载所有
 uninstall_all() {
     log_info "========== 卸载所有 Agent =========="
-    
+
     # 停止所有服务
     for svc in $(ls /etc/systemd/system/openclaw-session-watch*.service 2>/dev/null | xargs -n1 basename 2>/dev/null || true); do
         log_info "停止服务: $svc"
         systemctl stop "$svc" 2>/dev/null || true
         systemctl disable "$svc" 2>/dev/null || true
     done
-    
+
     rm -f /etc/systemd/system/openclaw-session-watch*.service
-    
+
     # 删除所有 agent 的脚本
     for dir in /root/.openclaw/workspace*; do
         if [ -d "$dir/scripts" ]; then
@@ -445,7 +464,7 @@ uninstall_all() {
             rm -f "$dir/scripts/sync_to_mem0.py"
         fi
     done
-    
+
     log_info "卸载完成"
 }
 
