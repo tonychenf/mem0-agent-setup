@@ -35,39 +35,7 @@ get_scripts_dir() {
 }
 
 # 解析参数
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --agent-id)
-            AGENT_ID="$2"
-            shift 2
-            ;;
-        --config)
-            CONFIG_FILE="$2"
-            shift 2
-            ;;
-        --no-systemd)
-            INSTALL_SYSTEMD=false
-            shift
-            ;;
-        --auto)
-            AUTO_DETECT_ALL=true
-            shift
-            ;;
-        --uninstall)
-            uninstall
-            ;;
-        --uninstall-all)
-            uninstall_all
-            ;;
-        --help)
-            show_help
-            ;;
-        *)
-            echo "未知参数: $1"
-            show_help
-            ;;
-    esac
-done
+
 
 show_help() {
     echo "用法: $0 [选项]"
@@ -512,3 +480,39 @@ check_dependencies() {
 }
 
 main
+
+
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --agent-id)
+            AGENT_ID="$2"
+            shift 2
+            ;;
+        --config)
+            CONFIG_FILE="$2"
+            shift 2
+            ;;
+        --no-systemd)
+            INSTALL_SYSTEMD=false
+            shift
+            ;;
+        --auto)
+            AUTO_DETECT_ALL=true
+            shift
+            ;;
+        --uninstall)
+            uninstall
+            ;;
+        --uninstall-all)
+            uninstall_all
+            ;;
+        --help)
+            show_help
+            ;;
+        *)
+            echo "未知参数: $1"
+            show_help
+            ;;
+    esac
+done
