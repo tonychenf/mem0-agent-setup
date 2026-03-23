@@ -14,6 +14,17 @@ const path = require('path');
 const { execSync } = require('child_process');
 
 const AGENT_ID = process.argv[2] || 'main';
+
+// 根据 agent_id 获取 workspace 路径
+function getWorkspaceDir(agentId) {
+    if (agentId === 'main') {
+        return '/root/.openclaw/workspace';
+    }
+    return `/root/.openclaw/workspace-${agentId}`;
+}
+
+const WORKSPACE_DIR = getWorkspaceDir(AGENT_ID);
+const SCRIPTS_DIR = path.join(WORKSPACE_DIR, 'scripts');
 const SESSIONS_DIR = `/root/.openclaw/agents/${AGENT_ID}/sessions`;
 const WATCH_INTERVAL = 5000; // 每5秒检查一次
 
@@ -98,10 +109,11 @@ function syncFile(filepath) {
   
   // 同步到 Mem0
   const messagesJson = JSON.stringify(validMessages.slice(0, 10));
+  const syncScript = path.join(SCRIPTS_DIR, 'sync_to_mem0.py');
   
   try {
     const result = execSync(
-      `AGENT_NAME=${AGENT_ID} python3 /root/.openclaw/workspace/scripts/sync_to_mem0.py`,
+      `AGENT_NAME=${AGENT_ID} python3 ${syncScript}`,
       { 
         encoding: 'utf-8', 
         timeout: 30000,

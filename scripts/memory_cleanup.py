@@ -11,7 +11,11 @@ import os
 import re
 from datetime import datetime, timedelta
 
-os.environ['OPENAI_API_KEY'] = 'REMOVED_API_KEY'
+if 'OPENAI_API_KEY' not in os.environ:
+    raise RuntimeError("请设置环境变量 OPENAI_API_KEY")
+
+os.environ['OPENAI_API_KEY'] = os.environ['OPENAI_API_KEY']
+os.environ['OPENAI_BASE_URL'] = os.environ.get('OPENAI_BASE_URL', 'https://api.siliconflow.cn/v1')
 
 from mem0 import Memory
 
