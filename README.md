@@ -53,6 +53,7 @@ Mem0 Agent Setup = **Mem0 + Qdrant + 自动化部署**
 - ✅ **自动记忆**：对话同时自动写入向量库
 - ✅ **智能检索**：每次回复前自动检索相关记忆
 - ✅ **多 Agent 支持**：main / capital / dev 等独立记忆
+- ✅ **独立 Workspace**：每个 Agent 部署到自己的 workspace 目录
 - ✅ **systemd 自启**：开机自动运行，永不丢失
 - ✅ **命令行工具**：status / stats / search 随时查看
 
@@ -79,10 +80,11 @@ Mem0 Agent Setup = **Mem0 + Qdrant + 自动化部署**
 
 ```bash
 # 手动清理（删除30天前的低分记忆）
+# 需要设置环境变量 OPENAI_API_KEY
 python3 scripts/memory_cleanup.py
 
 # 可设置 cron 每天自动执行
-0 3 * * * python3 /root/.openclaw/workspace/memory_cleanup.py
+0 3 * * * cd /path/to/mem0-agent-setup && OPENAI_API_KEY=xxx python3 scripts/memory_cleanup.py
 ```
 
 ## 📋 适用场景
