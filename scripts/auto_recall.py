@@ -85,7 +85,9 @@ def auto_recall(query: str, min_score: int = 2, mem_type: str = None, use_rerank
     """
     自动检索记忆（带 rerank）
     """
-    m = get_memory("mem0_main")
+    agent = os.environ.get('AGENT_NAME', 'main')
+    collection = f'mem0_{agent}'
+    m = get_memory(collection)
     results = m.search(query=query, user_id="fuge", limit=5)
     
     memories = results.get("results", [])

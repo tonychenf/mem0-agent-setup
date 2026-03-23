@@ -119,8 +119,10 @@ def add_memory(user_msg: str, assistant_msg: str):
     """添加记忆到 Mem0（带评分和分类）"""
     from mem0 import Memory
     
+    agent = os.environ.get('AGENT_NAME', 'main')
+    collection = f'mem0_{agent}'
     config = {
-        'vector_store': {'provider': 'qdrant', 'config': {'host': 'localhost', 'port': 6333, 'collection_name': 'mem0_main', 'embedding_model_dims': 1024}},
+        'vector_store': {'provider': 'qdrant', 'config': {'host': 'localhost', 'port': 6333, 'collection_name': collection, 'embedding_model_dims': 1024}},
         'llm': {'provider': 'openai', 'config': {'model': 'Qwen/Qwen2.5-7B-Instruct', 'openai_base_url': 'https://api.siliconflow.cn/v1', 'temperature': 0.1}},
         'embedder': {'provider': 'openai', 'config': {'model': 'BAAI/bge-large-zh-v1.5', 'openai_base_url': 'https://api.siliconflow.cn/v1', 'embedding_dims': 1024}}
     }
