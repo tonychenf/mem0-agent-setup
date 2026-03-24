@@ -133,6 +133,77 @@ def cmd_search(args):
         print(f"{i}. {r['memory'][:100]}...")
         print()
 
+
+def cmd_lookup(args):
+    """在指定 session 文件中查找相关对话片段"""
+    import os, sys, json, re
+    os.environ['OPENAI_API_KEY'] = os.environ.get('OPENAI_API_KEY') or ''
+    if not os.environ.get('OPENAI_API_KEY'):
+        print("ERROR: set OPENAI_API_KEY"); sys.exit(1)
+
+    from openai import OpenAI
+    API_KEY = os.environ['OPENAI_API_KEY']
+    BASE_URL = 'https://api.siliconflow.cn/v1'
+
+    session_id = args.session
+    keyword = args.keyword
+
+    # 找到 session 文件
+    import glob
+    pattern = f"/root/.openclaw/agents/main/sessions/{session_id}*.jsonl"
+    files = glob.glob(pattern)
+
+    if not files:
+        # 尝试只用 session_id 匹配
+        all_files = glob.glob("/root/.openclaw/agents/main/sessions/*.jsonl")
+        for f in all_files:
+            if session_id in f:
+                files = [f]
+                break
+
+    if not files:
+        print(f"Session file not found: {session_id}")
+        sys.exit(1)
+
+    filepath = files[0]
+    print(f"Searching in: {filepath}")
+    print(f"Keyword: {keyword}")
+    print()
+
+    # 读取 session 文件
+    snippets = []
+    with open(filepath) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line.strip())
+                if obj.get('type') == 'message':
+                    msg = obj.get('message', {})
+                    role = msg.get('role', '')
+                    content = msg.get('content', '')
+                    if isinstance(content, list):
+                        content = ' '.join(c.get('text','') for c in content if c.get('type')=='text')
+                    if role in ('user', 'assistant') and content.strip():
+                        # 提纯 user 内容
+                        if role == 'user' and content.startswith('System:'):
+                            m = re.search(r'Sender \(untrusted metadata\):[\s\S]+?\n\n([\s\S]+)$', content)
+                            if m and m.group(1).strip():
+                                content = m.group(1).strip()
+                        if keyword.lower() in content.lower():
+                            snippets.append(f"[{role.upper()}] {content[:300]}")
+            except:
+                pass
+
+    if not snippets:
+        print("No matching content found")
+        return
+
+    print(f"找到 {len(snippets)} 条相关片段：\n")
+    for s in snippets:
+        print(s)
+        print()
+
 def main():
     parser = argparse.ArgumentParser(description='Mem0 Agent 命令行工具')
     subparsers = parser.add_subparsers(dest='command', help='命令')
@@ -164,6 +235,11 @@ def main():
     # distill
     distill_parser = subparsers.add_parser('distill', help='精炼记忆（生成浓缩块）')
 
+    # lookup
+    lookup_parser = subparsers.add_parser('lookup', help='在 session 文件中查找相关片段')
+    lookup_parser.add_argument('--session', required=True, help='Session ID（如 7a31f376）')
+    lookup_parser.add_argument('--keyword', required=True, help='搜索关键词')
+
     args = parser.parse_args()
 
     if args.command == 'status':
@@ -182,6 +258,8 @@ def main():
         cmd_search(args)
     elif args.command == 'distill':
         cmd_distill(args)
+    elif args.command == 'lookup':
+        cmd_lookup(args)
     else:
         parser.print_help()
 
