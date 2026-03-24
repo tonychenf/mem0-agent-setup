@@ -210,7 +210,7 @@ def sync_messages(messages, agent_name: str = None) -> int:
                 [{'role': 'user', 'content': enhanced_content}, {'role': 'assistant', 'content': assistant}],
                 user_id='fuge',
                 agent_id=agent_name,
-                infer=False
+                infer=True
             )
             imported += 1
             
