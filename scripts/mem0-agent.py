@@ -160,9 +160,12 @@ def main():
     search_parser = subparsers.add_parser('search', help='搜索记忆')
     search_parser.add_argument('query', help='搜索关键词')
     search_parser.add_argument('--limit', type=int, default=5, help='结果数量')
-    
+
+    # distill
+    distill_parser = subparsers.add_parser('distill', help='精炼记忆（生成浓缩块）')
+
     args = parser.parse_args()
-    
+
     if args.command == 'status':
         cmd_status(args)
     elif args.command == 'start':
@@ -177,8 +180,107 @@ def main():
         cmd_stats(args)
     elif args.command == 'search':
         cmd_search(args)
+    elif args.command == 'distill':
+        cmd_distill(args)
     else:
         parser.print_help()
+
+
+
+def cmd_distill(args):
+    """精炼记忆 - 将碎片合并为浓缩的 [block]"""
+    import os, sys, re, time
+    os.environ['OPENAI_API_KEY'] = os.environ.get('OPENAI_API_KEY') or ''
+    if not os.environ.get('OPENAI_API_KEY'):
+        print("ERROR: set OPENAI_API_KEY env"); sys.exit(1)
+
+    from qdrant_client import QdrantClient
+    from openai import OpenAI
+    from mem0 import Memory
+
+    API_KEY = os.environ['OPENAI_API_KEY']
+    BASE_URL = 'https://api.siliconflow.cn/v1'
+    COLLECTION = 'mem0_main'
+    client = QdrantClient(url='http://localhost:6333')
+
+    print("Reading all records...")
+    records = []
+    offset = None
+    while True:
+        result = client.scroll(collection_name=COLLECTION, limit=200, offset=offset)
+        if not result[0]: break
+        for p in result[0]:
+            records.append({'id': p.id, 'data': p.payload.get('data', '')})
+        offset = result[1]
+        if offset is None: break
+
+    print(f"Total: {len(records)} records")
+
+    groups = {'episodic': [], 'semantic': [], 'procedural': []}
+    for r in records:
+        m_type = re.search(r'\[(episodic|semantic|procedural)\]', r['data'])
+        if '[distilled]' in r['data'] or not m_type:
+            continue
+        clean = re.sub(r'^\[[^\]]+\]\[score:\d+\]\s*', '', r['data']).strip()
+        if clean:
+            groups[m_type.group(1)].append({'id': r['id'], 'clean': clean})
+
+    print(f"Groups: episodic={len(groups['episodic'])} semantic={len(groups['semantic'])} procedural={len(groups['procedural'])}")
+
+    prompts = {
+        'episodic': "以下是从对话中提取的事件记忆片段，请将相关的合并为1-3条独立的自然语言陈述，每条一个主题：\n{block_list}\n\n要求：格式：[block] 完整陈述，多个主题分开。不要解释，只输出block列表。",
+        'semantic': "以下是从对话中提取的事实和偏好记忆片段，请将相关的合并为1-3条独立的自然语言陈述，每条一个主题：\n{block_list}\n\n要求：格式：[block] 完整陈述，多个主题分开。不要解释，只输出block列表。",
+        'procedural': "以下是从对话中提取的流程和方法记忆片段，请将相关的合并为1-3条独立的自然语言陈述，每条一个主题：\n{block_list}\n\n要求：格式：[block] 完整陈述，多个主题分开。不要解释，只输出block列表。",
+    }
+
+    llm_client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+
+    new_blocks = []
+    for mtype, grp in groups.items():
+        if not grp:
+            print(f"[{mtype}] no records, skip")
+            continue
+        sample = grp[:20]
+        block_list = '\n'.join([f"{i+1}. {r['clean']}" for i, r in enumerate(sample)])
+        prompt = prompts[mtype].format(block_list=block_list)
+        try:
+            resp = llm_client.chat.completions.create(
+                model='Qwen/Qwen2.5-7B-Instruct',
+                messages=[{'role': 'user', 'content': prompt}],
+                temperature=0.3
+            )
+            text = resp.choices[0].message.content.strip()
+            blocks = re.findall(r'\[block\]\s*(.+)', text)
+            print(f"[{mtype}] generated {len(blocks)} blocks")
+            for b in blocks:
+                new_blocks.append(f"[{mtype}][distilled] {b.strip()}")
+                print(f"  - {b.strip()[:80]}")
+        except Exception as e:
+            print(f"[{mtype}] LLM error: {e}")
+
+    if not new_blocks:
+        print("No blocks generated, aborting")
+        return
+
+    print(f"\nTotal: {len(new_blocks)} distill blocks")
+    confirm = input("Write to mem0? (y/n): ")
+    if confirm.strip().lower() != 'y':
+        print("Cancelled")
+        return
+
+    m = Memory.from_config({
+        'vector_store': {'provider': 'qdrant', 'config': {'host': 'localhost', 'port': 6333, 'collection_name': COLLECTION, 'embedding_model_dims': 1024}},
+        'llm': {'provider': 'openai', 'config': {'model': 'Qwen/Qwen2.5-7B-Instruct', 'openai_base_url': BASE_URL, 'temperature': 0.1}},
+        'embedder': {'provider': 'openai', 'config': {'model': 'BAAI/bge-large-zh-v1.5', 'openai_base_url': BASE_URL, 'embedding_dims': 1024}}
+    })
+
+    for b in new_blocks:
+        try:
+            m.add([{'role': 'user', 'content': b}], user_id='fuge', agent_id='main', infer=True)
+            time.sleep(0.3)
+        except Exception as e:
+            print(f"Write error: {e}")
+    print(f"Done! {len(new_blocks)} distill blocks written")
 
 if __name__ == '__main__':
     main()
