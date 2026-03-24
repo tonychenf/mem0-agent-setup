@@ -54,7 +54,7 @@ def cleanup_memories(days: int = 30):
     m = get_memory()
     
     # 获取所有记忆
-    all_results = m.get_all(user_id="fuge")
+    all_results = m.get_all(user_id=os.environ.get("MEM0_USER_ID", "user"))
     memories = all_results.get("results", [])
     
     if not memories:
@@ -86,7 +86,7 @@ def cleanup_memories(days: int = 30):
                 if age_days > keep_days:
                     # 删除
                     try:
-                        m.delete(memory_id=mem_id, user_id="fuge")
+                        m.delete(memory_id=mem_id, user_id=os.environ.get("MEM0_USER_ID", "user"))
                         delete_count += 1
                         print(f"  🗑️ 删除 [score:{score}] {text[:30]}... ({age_days}天)")
                     except Exception as e:

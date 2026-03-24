@@ -208,7 +208,7 @@ def sync_messages(messages, agent_name: str = None) -> int:
             
             m.add(
                 [{'role': 'user', 'content': enhanced_content}, {'role': 'assistant', 'content': assistant}],
-                user_id='fuge',
+                user_id=os.environ.get("MEM0_USER_ID", "user"),
                 agent_id=agent_name,
                 infer=True
             )

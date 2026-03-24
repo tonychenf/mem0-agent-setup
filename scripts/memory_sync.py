@@ -100,7 +100,7 @@ def sync_memories(days: int = 7):
         for user_msg, assistant_msg in conversations:
             if should_save(user_msg):
                 try:
-                    m.add([{"role": "user", "content": user_msg}, {"role": "assistant", "content": assistant_msg}], user_id="fuge")
+                    m.add([{"role": "user", "content": user_msg}, {"role": "assistant", "content": assistant_msg}], user_id=os.environ.get("MEM0_USER_ID", "user"))
                     saved_count += 1
                     print(f"  ✅ {user_msg[:30]}...")
                 except Exception as e:

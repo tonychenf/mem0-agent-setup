@@ -141,7 +141,7 @@ def add_memory(user_msg: str, assistant_msg: str):
         {"role": "assistant", "content": assistant_msg}
     ]
     
-    result = m.add(messages, user_id="fuge")
+    result = m.add(messages, user_id=os.environ.get("MEM0_USER_ID", "user"))
     return {'score': score, 'type': mem_type, 'result': result}
 
 def auto_save(user_msg: str, assistant_msg: str):

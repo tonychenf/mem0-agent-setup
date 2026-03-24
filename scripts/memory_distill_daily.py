@@ -215,7 +215,7 @@ def write_blocks(blocks_with_scores, qdrant_client, embed_api_key, agent, collec
             continue
 
         payload = {
-            "user_id": "fuge",
+            "user_id": os.environ.get("MEM0_USER_ID", "user"),
             "agent_id": agent,
             "role": "user",
             "data": record,

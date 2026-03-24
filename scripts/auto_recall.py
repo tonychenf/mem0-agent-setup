@@ -136,7 +136,7 @@ def auto_recall(query, min_score=2):
     """主函数：搜索记忆，自动加载 session 上下文"""
     agent = os.environ.get("AGENT_NAME", "main")
     m = get_mem0(f"mem0_{agent}")
-    results = m.search(query=query, user_id="fuge", limit=5)
+    results = m.search(query=query, user_id=os.environ.get("MEM0_USER_ID", "user"), limit=5)
     memories = results.get("results", [])
     if not memories:
         return ""
