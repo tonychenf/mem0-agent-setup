@@ -80,18 +80,22 @@ def extract_user_content(text: str) -> str:
     return text.strip()
 
 def distill_conversations(conversations, llm_client) -> list:
-    """调用 LLM 将对话蒸馏成独立的记忆 block"""
+    """调用 LLM 将对话蒸馏成独立的记忆 block，返回 (block_text, session_info) 列表"""
     if not conversations:
         return []
+
+    # 收集所有 session 文件
+    unique_sessions = list(set(c["session"] for c in conversations))
+    session_list = ", ".join(unique_sessions)
 
     # 构造输入文本
     lines = []
     for i, c in enumerate(conversations):
         prefix = "User" if c["role"] == "user" else "Assistant"
-        lines.append(f"[{i+1}] {prefix}: {c['content']}")
+        lines.append(f"[{i+1}] [{c['session']}] {prefix}: {c['content']}")
 
     block_list = "\n".join(lines)
-    prompt = f"""你是记忆整理助手。以下是一段时间内的对话记录：
+    prompt = f"""你是记忆整理助手。以下是一段时间内的对话记录，涉及 session 文件：{session_list}
 
 {block_list}
 
@@ -101,14 +105,9 @@ def distill_conversations(conversations, llm_client) -> list:
 - 每个 block 包含一个独立的事实/事件/方法
 - 相同主题的内容合并为一个 block
 - 不重要的闲聊忽略
-- 用 [block] 开头
+- 用 [block] 开头，格式：[block] 陈述内容
 
-格式示例：
-[block] 孚哥今天和张总讨论了AI合作项目
-[block] 讨论决定采用 mem0 作为长期记忆系统
-[block] 向量重建流程：先删后重建再验证
-
-不要解释，只输出 block 列表。"""
+不要解释，只输出 block 列表，每个一行。"""
 
     try:
         resp = llm_client.chat.completions.create(
@@ -119,17 +118,18 @@ def distill_conversations(conversations, llm_client) -> list:
         text = resp.choices[0].message.content.strip()
         blocks = re.findall(r"\[block\]\s*(.+)", text)
         print(f"  LLM 生成了 {len(blocks)} 个 blocks")
-        return blocks
+        # 所有 block 都关联所有 session 文件（简化处理）
+        return [(b.strip(), unique_sessions) for b in blocks]
     except Exception as e:
         print(f"  LLM 错误: {e}")
         return []
 
-def score_blocks(blocks, llm_client) -> list:
-    """对每个 block 评分，返回 (block_text, score) 列表"""
-    if not blocks:
+def score_blocks(blocks_with_sessions, llm_client) -> list:
+    """对每个 block 评分，返回 (block_text, score, sessions) 列表"""
+    if not blocks_with_sessions:
         return []
 
-    block_text = "\n".join([f"{i+1}. {b}" for i, b in enumerate(blocks)])
+    block_text = "\n".join([f"{i+1}. {b}" for i, (b, sess) in enumerate(blocks_with_sessions)])
 
     prompt = f"""以下是从对话中提炼的记忆 block，请对每个评分：
 
@@ -160,10 +160,13 @@ def score_blocks(blocks, llm_client) -> list:
             if "|" in line:
                 parts = line.split("|", 1)
                 score_str = parts[0].strip()
-                content = parts[1].strip()
+                block_text = parts[1].strip()
                 try:
                     score = int(score_str)
-                    scored.append((content, score))
+                    # 匹配回 sessions（用索引）
+                    idx = len(scored)
+                    sessions = blocks_with_sessions[idx][1] if idx < len(blocks_with_sessions) else []
+                    scored.append((block_text, score, sessions))
                 except:
                     pass
         print(f"  评分了 {len(scored)} 个 blocks")
@@ -204,9 +207,9 @@ def determine_type(block_text: str, llm_client) -> str:
 def write_to_mem0(blocks_with_scores, m, min_score=3):
     """将评分合格的 blocks 写入 mem0"""
     written = 0
-    for content, score in blocks_with_scores:
+    for block_text, score, sessions in blocks_with_scores:
         if score < min_score:
-            print(f"  跳过(score={score}): {content[:50]}...")
+            print(f"  跳过(score={score}): {block_text[:50]}...")
             continue
 
         # 判断类型
@@ -220,10 +223,12 @@ def write_to_mem0(blocks_with_scores, m, min_score=3):
         else:
             mem_type = "semantic"
 
-        record = f"[{mem_type}][score:{score}][distilled] {content}"
+        # session 文件路径
+        session_files = ", ".join([f"/root/.openclaw/agents/main/sessions/{s}" for s in sessions])
+        record = f"[{mem_type}][score:{score}][distilled][sessions:{len(sessions)}][files:{session_files}]\n{block_text}"
         try:
             m.add([{"role": "user", "content": record}], user_id="fuge", agent_id="main", infer=True)
-            print(f"  ✅ [{mem_type}][score:{score}] {content[:60]}...")
+            print(f"  ✅ [{mem_type}][score:{score}] {block_text[:60]}...")
             written += 1
             time.sleep(0.3)
         except Exception as e:
@@ -310,15 +315,15 @@ def main():
 
     # 蒸馏
     print("🔮 开始蒸馏...")
-    blocks = distill_conversations(conversations, client_llm)
+    blocks_with_sessions = distill_conversations(conversations, client_llm)
 
-    if not blocks:
+    if not blocks_with_sessions:
         print("蒸馏失败或无输出")
         return
 
     # 评分
     print("📊 开始评分...")
-    scored = score_blocks(blocks, client_llm)
+    scored = score_blocks(blocks_with_sessions, client_llm)
 
     if not scored:
         print("评分失败或无输出")
@@ -327,19 +332,21 @@ def main():
     # 预览
     print(f"\n📋 评分结果（共 {len(scored)} 个 blocks）：")
     score_groups = {5: [], 4: [], 3: [], 2: [], 1: []}
-    for content, score in scored:
-        score_groups[score].append(content)
+    for block_text, score, sessions in scored:
+        score_groups[score].append((block_text, sessions))
 
     for s in [5, 4, 3, 2, 1]:
         if score_groups[s]:
             label = {5: "🔴核心", 4: "🟠重要", 3: "🟡一般", 2: "🟢临时", 1: "⚪无价值"}[s]
             print(f"\n  {label} (score={s})，共 {len(score_groups[s])} 条：")
             for c in score_groups[s][:5]:
-                print(f"    - {c[:80]}...")
+                block_text, sessions = c
+                print(f"    - {block_text[:80]}...")
+                print(f"      📁 {len(sessions)} session(s): {", ".join(sessions[:2])}{" ..." if len(sessions)>2 else ""}")
             if len(score_groups[s]) > 5:
                 print(f"    ... 还有 {len(score_groups[s])-5} 条")
 
-    to_store = [(c, s) for c, s in scored if s >= 3]
+    to_store = [(b, s, sess) for b, s, sess in scored if s >= 3]
     print(f"\n将存入 {len(to_store)} 条（score >= 3）")
 
     if args.dry_run:
