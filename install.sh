@@ -284,9 +284,9 @@ check_scripts() {
             fi
         done
         # 部署 mem0-agent CLI
-        if [ -f "bin/mem0-agent" ]; then
-            cp bin/mem0-agent "$SCRIPT_DIR/"/
-            chmod +x "$SCRIPT_DIR/mem0-agent"
+        if [ -f "bin/mem0-agent.py" ]; then
+            cp bin/mem0-agent.py "$SCRIPT_DIR/"/
+            chmod +x "$SCRIPT_DIR/mem0-agent.py"
         fi
         return 1
     fi
@@ -455,7 +455,7 @@ uninstall() {
     rm -f "$SCRIPTS_DIR/auto_memory.py"
     rm -f "$SCRIPTS_DIR/memory_cleanup.py"
     rm -f "$SCRIPTS_DIR/memory_sync.py"
-    rm -f "$SCRIPTS_DIR/mem0-agent"
+    rm -f "$SCRIPTS_DIR/mem0-agent.py"
 
     # 删除清理 cron
     crontab -l 2>/dev/null | grep -v "memory_cleanup.py" | crontab - 2>/dev/null || true
@@ -488,7 +488,7 @@ uninstall_all() {
             rm -f "$dir/scripts/auto_memory.py"
             rm -f "$dir/scripts/memory_cleanup.py"
             rm -f "$dir/scripts/memory_sync.py"
-            rm -f "$dir/scripts/mem0-agent"
+            rm -f "$dir/scripts/mem0-agent.py"
         fi
     done
 
