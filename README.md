@@ -287,3 +287,51 @@ mem0-agent search "关键词"  # 搜索记忆
 ## 📄 License
 
 MIT
+
+---
+
+## v2 架构（蒸馏模式）
+
+### 核心设计
+
+所有对话先暂存，定期蒸馏，只存精华。
+
+### 流程
+
+```
+watch_sessions.js → sync_to_mem0.py --stage-only → .pending_conversations.jsonl
+                                                              ↓
+memory_distill_daily.py（每日cron）→ LLM distill → 评分 ≥3 → mem0_main
+```
+
+### 存储结构
+
+```
+mem0_main:
+  [type][score:N][distilled] 记忆块内容
+```
+
+### 每日 distill
+
+```bash
+# 手动触发
+python3 mem0-agent.py distill
+
+# 自动（每日凌晨4点）
+# 详见 install.sh cron 配置
+```
+
+### 评分标准
+
+| 评分 | 说明 | 存主库 |
+|------|------|--------|
+| 5 | 核心事实 | ✅ |
+| 4 | 重要信息 | ✅ |
+| 3 | 一般信息 | ✅ |
+| 1-2 | 无价值 | ❌ |
+
+### 暂存文件
+
+- 路径：`/root/.openclaw/workspace/.pending_conversations.jsonl`
+- 由 `sync_to_mem0.py --stage-only` 写入
+- `distill` 完成后自动清空

@@ -219,33 +219,7 @@ def sync_messages(messages, agent_name: str = None) -> int:
     
     return imported
 
-STAGING_FILE = "/root/.openclaw/workspace/.pending_conversations.jsonl"
-
-def append_to_staging(messages, agent_name):
-    """追加原始对话到暂存文件，不写入 Qdrant"""
-    with open(STAGING_FILE, 'a') as f:
-        for msg in messages:
-            f.write(json.dumps({
-                "agent": agent_name,
-                "msg": msg,
-                "at": __import__("datetime").datetime.now().isoformat()
-            }, ensure_ascii=False) + "\n")
-
 def main():
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--stage-only", action="store_true", help="只暂存，不写入 Qdrant")
-    parser.add_argument("--flush", action="store_true", help="清空暂存文件（distill 完成后调用）")
-    args = parser.parse_args()
-
-    if args.flush:
-        if os.path.exists(STAGING_FILE):
-            os.remove(STAGING_FILE)
-            print("FLUSHED")
-        else:
-            print("FLUSHED (nothing to flush)")
-        return
-
     messages_json = sys.stdin.read().strip()
     
     if not messages_json:
@@ -259,13 +233,8 @@ def main():
         return
     
     agent_name = get_agent_name()
-
-    if args.stage_only:
-        append_to_staging(messages, agent_name)
-        print(f"STAGED:{len(messages)}")
-        return
-
     imported = sync_messages(messages, agent_name)
+    
     print(f"DONE:{imported}")
 
 if __name__ == '__main__':
