@@ -1,5 +1,7 @@
 # Mem0 Agent Setup
 
+> 🦋 **Agent 必读**：[AGENT_GUIDE.md](AGENT_GUIDE.md) — 面向 AI Agent 的配置指引，帮助你理解系统架构、如何使用、以及多 Agent 环境检查方法。
+
 为 AI Agent 配置向量记忆系统，让 AI 拥有"长期记忆"能力。
 
 ## 😰 痛点
