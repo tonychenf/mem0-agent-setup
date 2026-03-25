@@ -428,6 +428,14 @@ detect_agents() {
 
 # 检测所有 Agent 并配置
 auto_setup_all_agents() {
+    # 检查是否已有旧安装（auto 模式自动清理后重装）
+    if ls /etc/systemd/system/openclaw-session-watch-*.service 1>/dev/null 2>&1 || \
+       crontab -l 2>/dev/null | grep -q "memory_distill_daily.py\|memory_cleanup.py"; then
+        log_warn "检测到旧安装，正在清除..."
+        uninstall_all
+        echo ""
+    fi
+
     log_info "========== 自动检测 OpenClaw Agent =========="
 
     local agents=$(detect_agents)
@@ -439,6 +447,9 @@ auto_setup_all_agents() {
     for agent in $agents; do
         log_info "========== 配置 Agent: $agent =========="
         AGENT_ID=$agent install_single_agent
+        # 设置 per-agent 的 cron
+        AGENT_ID=$agent setup_cleanup_cron
+        AGENT_ID=$agent setup_distill_cron
         echo ""
     done
 

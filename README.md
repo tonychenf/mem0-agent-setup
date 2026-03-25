@@ -127,7 +127,7 @@ export OPENAI_BASE_URL="https://api.siliconflow.cn/v1"
 # 安装单个 Agent（默认 main）
 bash install.sh
 
-# 自动检测并配置所有 Agent（推荐！）
+# 自动检测并配置所有 Agent（推荐！会自动清理旧版本后重装）
 bash install.sh --auto
 
 # 指定 Agent
@@ -138,7 +138,7 @@ bash install.sh --uninstall
 bash install.sh --uninstall-all
 ```
 
-> 💡 `--auto` 会自动检测 OpenClaw 中的所有 Agent（main、capital、dev 等），并为每个 Agent 配置独立的记忆系统
+> 💡 `--auto` 会自动检测 OpenClaw 中的所有 Agent（main、capital、dev 等），并为每个 Agent 配置独立的记忆系统。如果检测到旧安装，会自动清除后重新安装。
 
 ### 4. 测试一下
 
