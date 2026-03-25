@@ -282,3 +282,63 @@ python3 /root/.openclaw/mem0-agent-setup/scripts/memory_distill_daily.py \
 ---
 
 *最后更新：2026-03-25 by 落雁 🦋*
+
+---
+
+## Active Recall 与 Context 拼接（v5 架构）
+
+### 核心改进
+
+1. **层级分类**：每条记忆明确标注属于哪一层（Semantic/Episodic/Procedural）
+2. **层级定义**：每层有明确的定义 prompt，告诉 AI 在什么场景下使用这些记忆
+3. **Session 完整上下文**：不只是返回 block 内容，还从 [files:/path] 拉取原始 session 片段
+
+### 三层层级定义
+
+| 层级 | 定义 | 触发场景 |
+|------|------|---------|
+| **Semantic 语义层** | "回答请符合用户偏好、沟通习惯、语言风格" | 涉及用户喜好、沟通方式 |
+| **Episodic 事件层** | "回答请参考用户的历史决策、重大事件" | 涉及项目进展、决策历史 |
+| **Procedural 程序层** | "回答请遵循用户认可的工作流程和操作步骤" | 涉及操作流程、方法论 |
+
+### Block 新格式
+
+```
+[层级:Episodic][层级定义:回答请参考用户的历史决策、重大事件][score:5][distilled][sessions:2][files:/path/to/s1.jsonl,/path/to/s2.jsonl]
+用户提到项目ABC需要在周五前完成测试报告
+```
+
+### Context 拼接效果
+
+```
+## 📚 相关记忆（按层级分类）
+
+🧠 **语义层** — 回答请符合用户偏好、沟通习惯、语言风格
+
+  • 用户喜欢简洁的回复 [score=4]
+    └ 01a3b4c.jsonl
+      user: 请帮我查一下
+      assistant: 好的，这是结果
+
+📅 **事件层** — 回答请参考用户的历史决策、重大事件
+
+  • 用户提到项目ABC需要在周五前完成 [score=5]
+    └ 05e6f7a.jsonl
+      user: 项目ABC进度如何？
+      assistant: 周五前可以完成
+      user: 记得包含测试报告
+    └ 09h2i8b.jsonl
+      user: 质量第一
+
+⚙️ **程序层** — 回答请遵循用户认可的工作流程和操作步骤
+
+  • 用户要求所有代码必须先写测试再提交 [score=5]
+    └ 12k3l4m.jsonl
+      user: 如何提交代码？
+      assistant: 先写测试，测试通过后再提交MR
+```
+
+### 实施文件
+
+- `memory_distill_daily.py` — 蒸馏时增加层级分类
+- `auto_recall.py` — 按层级分组 + 读取 session 上下文
