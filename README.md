@@ -283,7 +283,7 @@ mem0-agent search "关键词"  # 搜索记忆
 
 ## 📚 文档
 
-- [客户端配置指南（飞书文档）](https://www.feishu.cn/docx/Pj1EdcEYyo92wfx1XoTcCiq5nPg)
+- [客户端配置指南（飞书文档）](https://www.feishu.cn/docx/L0HldmlNSobggfxAohFcRL2nnSh)
 
 ## 🤝 贡献
 
