@@ -10,7 +10,56 @@ import os, sys, re, json
 from pathlib import Path
 from collections import defaultdict
 
-# === 环境变量加载 ===
+# === Workspace .env 加载（从对应 workspace 读取 AGENT_ID） ===
+def load_workspace_env():
+    """从 workspace 的 .env 文件加载 AGENT_ID"""
+    # 已知的所有 workspace 路径
+    workspace_map = {
+        "main": "/root/.openclaw/workspace",
+        "capital": "/root/.openclaw/workspace-capital",
+        "dev": "/root/.openclaw/workspace-dev",
+        "legal": "/root/.openclaw/workspace-legal",
+        "ops": "/root/.openclaw/workspace-ops",
+        "rich": "/root/.openclaw/workspace-rich",
+        "taizi": "/root/.openclaw/workspace-taizi",
+    }
+    # 优先从 caller 传入的 WORKSPACE_DIR 读
+    workspace_dir = os.environ.get("WORKSPACE_DIR", "")
+    if workspace_dir:
+        env_file = os.path.join(workspace_dir, ".env")
+        if os.path.exists(env_file):
+            with open(env_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, v = line.split("=", 1)
+                        if k.strip() == "AGENT_ID":
+                            return v.strip()
+    # 否则遍历找存在的 .env
+    for agent_id, ws_path in workspace_map.items():
+        env_file = os.path.join(ws_path, ".env")
+        if os.path.exists(env_file):
+            with open(env_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, v = line.split("=", 1)
+                        if k.strip() == "AGENT_ID":
+                            return v.strip()
+    return "main"
+
+_detected_agent_id = None
+
+def get_agent_id():
+    """获取当前 agent ID（惰性计算，只计算一次）"""
+    global _detected_agent_id
+    if _detected_agent_id is not None:
+        return _detected_agent_id
+    # 优先用 AGENT_NAME 环境变量（systemd watchdog 设置的）
+    _detected_agent_id = os.environ.get("AGENT_NAME", "") or load_workspace_env()
+    return _detected_agent_id
+
+# === 共享 .env 加载 ===
 for env_path in ["/root/.openclaw/mem0-agent-setup/.env"]:
     if os.path.exists(env_path):
         with open(env_path) as f:
@@ -302,7 +351,7 @@ def auto_recall(query, min_score=DEFAULT_MIN_SCORE, limit=DEFAULT_LIMIT):
         格式化后的记忆文本
     """
     # 确定 collection
-    agent = os.environ.get("AGENT_NAME", "main")
+    agent = get_agent_id()
     collection = f"mem0_{agent}"
 
     # 向量检索
