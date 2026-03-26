@@ -105,17 +105,9 @@ def distill_batch(conversations_batch, llm_client):
 - 每个 block 包含一个独立的事实/事件/方法
 - 相同主题的内容合并为一个 block
 - 不重要的闲聊忽略
-- 每个 block 必须标注层级
+- 用 [block] 开头，格式：[block] 陈述内容
 
-格式（严格按此格式，每个 block 之间空一行）：
-[层级:Semantic|层级:Episodic|层级:Procedural]
-[{{block}}内容]
-
-示例：
-[层级:Episodic]
-用户提到项目ABC需要在周五前完成测试报告
-
-不要解释，只输出 block 列表。"""
+不要解释，只输出 block 列表，每个一行。"""
     try:
         resp = llm_client.chat.completions.create(
             model="Qwen/Qwen2.5-7B-Instruct",
@@ -123,28 +115,11 @@ def distill_batch(conversations_batch, llm_client):
             temperature=0.3
         )
         text = resp.choices[0].message.content.strip()
-        # 解析带层级的 block
-        parsed = parse_distilled_blocks(text)
-        return [(b.strip(), sessions, layer) for b, layer in parsed]
+        blocks = re.findall(r"\[block\]\s*(.+)", text)
+        return [(b.strip(), sessions) for b in blocks]
     except Exception as e:
         print(f"  LLM 错误: {e}")
         return []
-
-def parse_distilled_blocks(text):
-    """解析带层级分类的block文本"""
-    pattern = re.compile(
-        r'\[层级:(\w+)\]\s*\n*([\s\S]+?)(?=\[层级:|$)',
-        re.MULTILINE | re.DOTALL
-    )
-    results = []
-    for m in pattern.finditer(text):
-        layer = m.group(1)
-        content = m.group(2).strip()
-        if content:
-            results.append((content, layer))
-    return results
-
-
 
 def distill_conversations_batched(conversations, llm_client, batch_size=80):
     """分批蒸馏，合并结果"""
@@ -163,76 +138,68 @@ def distill_conversations_batched(conversations, llm_client, batch_size=80):
     print(f"  共生成 {len(all_blocks)} 个 blocks")
     return all_blocks
 
-def score_blocks(blocks_with_layers, llm_client, batch_size=30):
-    """对 blocks 评分，保持层级信息（批量处理避免 prompt 过长）"""
-    if not blocks_with_layers:
+def score_blocks(blocks_with_sessions, llm_client):
+    """对所有 blocks 评分"""
+    if not blocks_with_sessions:
         return []
-    
-    scored = []
-    total_batches = (len(blocks_with_layers) + batch_size - 1) // batch_size
-    print(f"  分 {total_batches} 批评分（每批 {batch_size} 条）")
-    
-    for batch_idx in range(total_batches):
-        start = batch_idx * batch_size
-        end = min(start + batch_size, len(blocks_with_layers))
-        batch = blocks_with_layers[start:end]
-        
-        texts = [b[0] for b in batch]
-        sessions_all = [b[1] for b in batch]
-        layers = [b[2] for b in batch]
-        
-        prompt = """以下是从对话中提炼的记忆 block，请对每个评分（1-5分，5分最重要）：
-1分：闲聊、无关内容
-2分：一般信息
-3分：有价值的信息
-4分：重要信息
-5分：关键信息（如决策、承诺、偏好、重要事件）
+    block_text = "\n".join([f"{i+1}. {b}" for i, (b, _) in enumerate(blocks_with_sessions)])
+    prompt = f"""以下是从对话中提炼的记忆 block，请对每个评分：
 
-评分格式（严格一行一个）：
-[分数] block内容
+{block_text}
 
-block列表：
-""" + "\n".join([f"[{i+1}] {t}" for i, t in enumerate(texts)])
+评分标准：
+- 5分：核心事实，必须记住
+- 4分：重要信息，值得保留
+- 3分：一般信息，可以保留
+- 2分：临时信息，不值得单独保留
+- 1分：无价值信息
 
-        try:
-            resp = llm_client.chat.completions.create(
-                model="Qwen/Qwen2.5-7B-Instruct",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1
-            )
-            text = resp.choices[0].message.content.strip()
-            lines = [l.strip() for l in text.split("\n") if l.strip()]
-            batch_scored = 0
-            for line in lines:
-                m = re.match(r'\[?(\d)\]?\s*(.+)', line)
-                if m:
-                    score = int(m.group(1))
-                    block_text = m.group(2).strip()
-                    for j, t in enumerate(texts):
-                        if block_text == t or block_text in t:
-                            scored.append((block_text, score, sessions_all[j], layers[j]))
-                            batch_scored += 1
-                            break
-            print(f"    第{batch_idx+1}批：评分了 {batch_scored} 个")
-        except Exception as e:
-            print(f"    第{batch_idx+1}批 LLM 错误: {e}")
-    
-    print(f"  共评分了 {len(scored)} 个 blocks")
-    return scored
+格式（每行）：
+评分 | block内容
+
+只输出评分行，不要其他内容。"""
+    try:
+        resp = llm_client.chat.completions.create(
+            model="Qwen/Qwen2.5-7B-Instruct",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1
+        )
+        text = resp.choices[0].message.content.strip()
+        scored = []
+        for line in text.split("\n"):
+            line = line.strip()
+            if "|" in line:
+                parts = line.split("|", 1)
+                try:
+                    score = int(parts[0].strip())
+                    idx = len(scored)
+                    sessions = blocks_with_sessions[idx][1] if idx < len(blocks_with_sessions) else []
+                    scored.append((parts[1].strip(), score, sessions))
+                except:
+                    pass
+        print(f"  评分了 {len(scored)} 个 blocks")
+        return scored
+    except Exception as e:
+        print(f"  评分 LLM 错误: {e}")
+        return []
 
 def write_blocks(blocks_with_scores, qdrant_client, embed_api_key, agent, collection, min_score=3):
     """手动生成向量并直接写入 Qdrant"""
     import uuid, requests
 
     written = 0
-    for item in blocks_with_scores:
-        if len(item) != 4:
-            continue
-        block_text, score, sessions, layer = item[:4]
+    for block_text, score, sessions in blocks_with_scores:
         if score < min_score:
             continue
-        files = ",".join([f"/root/.openclaw/agents/{agent}/sessions/{s}" for s in sessions])
-        record = f"[层级:{layer}][score:{score}][distilled][sessions:{len(sessions)}][files:{files}]\n{block_text}"
+        c = block_text.lower()
+        if any(k in c for k in ["流程", "步骤", "方法", "如何", "先", "然后"]):
+            mtype = "procedural"
+        elif any(k in c for k in ["今天", "昨天", "讨论", "开会", "做了", "完成"]):
+            mtype = "episodic"
+        else:
+            mtype = "semantic"
+        files = ", ".join([f"/root/.openclaw/agents/{agent}/sessions/{s}" for s in sessions])
+        record = f"[{mtype}][score:{score}][distilled][sessions:{len(sessions)}][files:{files}]\n{block_text}"
 
         # Generate embedding via REST API
         try:
@@ -248,13 +215,12 @@ def write_blocks(blocks_with_scores, qdrant_client, embed_api_key, agent, collec
             continue
 
         payload = {
-            "user_id": os.environ.get("MEM0_USER_ID", "fuge"),
+            "user_id": os.environ.get("MEM0_USER_ID", "user"),
             "agent_id": agent,
             "role": "user",
             "data": record,
             "hash": str(uuid.uuid4()),
             "created_at": datetime.now().isoformat(),
-            "layer": layer,
         }
 
         point = {
@@ -264,7 +230,7 @@ def write_blocks(blocks_with_scores, qdrant_client, embed_api_key, agent, collec
         }
         try:
             qdrant_client.upsert(collection_name=collection, points=[point])
-            print(f"  OK [层级:{layer}][score:{score}] {block_text[:60]}...")
+            print(f"  OK [{mtype}][score:{score}] {block_text[:60]}...")
             written += 1
             time.sleep(0.3)
         except Exception as e:
@@ -333,18 +299,14 @@ def main():
 
     print(f"\n评分结果（共 {len(scored)} 个 blocks）：")
     for s in [5, 4, 3, 2, 1]:
-        g = [item for item in scored if item[1] == s]
+        g = [(b, ss) for b, sc, ss in scored if sc == s]
         if g:
             label = {5: "core", 4: "important", 3: "normal", 2: "temp", 1: "discard"}[s]
-            layer_count = {}
-            for item in g:
-                layer = item[3] if len(item) > 3 else "?"
-                layer_count[layer] = layer_count.get(layer, 0) + 1
-            print(f"  score={s} ({label}): {len(g)} 条 {layer_count}")
-            for item in g[:3]:
-                print(f"    - [{item[3]}] {item[0][:80]}...")
+            print(f"  score={s} ({label}): {len(g)} 条")
+            for b, ss in g[:3]:
+                print(f"    - {b[:80]}")
 
-    to_store = [item for item in scored if item[1] >= 3]
+    to_store = [(b, sc, ss) for b, sc, ss in scored if sc >= 3]
     print(f"\n将存入 {len(to_store)} 条（score>=3）")
 
     if dry_run:

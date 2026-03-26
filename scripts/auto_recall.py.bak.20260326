@@ -1,0 +1,292 @@
+#!/usr/bin/env python3
+"""
+auto_recall - 自动记忆读取（v5）
+支持层级分类 + Session 完整上下文
+"""
+import os, sys, re, json
+from pathlib import Path
+from collections import defaultdict
+
+# === 环境变量加载 ===
+for env_path in ["/root/.openclaw/mem0-agent-setup/.env"]:
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    key, val = line.split("=", 1)
+                    os.environ[key.strip()] = val.strip()
+        break
+
+API_KEY = os.environ.get("OPENAI_API_KEY", "")
+if not API_KEY:
+    raise RuntimeError("请设置 OPENAI_API_KEY 环境变量")
+
+BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.siliconflow.cn/v1")
+os.environ["OPENAI_BASE_URL"] = BASE_URL
+
+from mem0 import Memory
+from openai import OpenAI
+
+# === 层级定义 ===
+LAYER_DEFINITIONS = {
+    "semantic": "回答请符合用户偏好、沟通习惯、语言风格",
+    "episodic": "回答请参考用户的历史决策、重大事件",
+    "procedural": "回答请遵循用户认可的工作流程和操作步骤"
+}
+
+LAYER_ICONS = {
+    "semantic": "🧠",
+    "episodic": "📅",
+    "procedural": "⚙️",
+    "unknown": "❓"
+}
+
+LAYER_NAMES_CN = {
+    "semantic": "语义层",
+    "episodic": "事件层",
+    "procedural": "程序层",
+    "unknown": "未知层"
+}
+
+def get_mem0(collection="mem0_main"):
+    return Memory.from_config({
+        "vector_store": {
+            "provider": "qdrant",
+            "config": {
+                "collection_name": collection,
+                "embedding_model_dims": 1024,
+            "url": "http://localhost:6333"
+            }
+        },
+        "llm": {
+            "provider": "openai",
+            "config": {
+                "model": "Qwen/Qwen2.5-7B-Instruct",
+                "openai_base_url": BASE_URL,
+                "temperature": 0.1
+            }
+        },
+        "embedder": {
+            "provider": "openai",
+            "config": {
+                "model": "BAAI/bge-large-zh-v1.5",
+                "openai_base_url": BASE_URL,
+                "embedding_dims": 1024
+            }
+        }
+    })
+
+
+def parse_memory(text):
+    """解析记忆：提取层级、分数、文件路径、纯文本（层级定义在 recall 时硬编码注入）"""
+    # 格式：[层级:Episodic][score:5][distilled][sessions:2][files:/path]
+    layer_m = re.search(r'\[层级:(\w+)\]', text)
+    score_m = re.search(r'\[score:(\d+)\]', text)
+    files_m = re.search(r'\[files:([^\]]+)\]', text)
+
+    layer = layer_m.group(1).lower() if layer_m else "unknown"
+    # 层级定义硬编码，不从 block 读取
+    layer_def = LAYER_DEFINITIONS.get(layer, "")
+    score = int(score_m.group(1)) if score_m else 3
+    files = [f.strip() for f in files_m.group(1).split(",")] if files_m else []
+
+    # 去掉所有 [xxx] 前缀
+    clean = text
+    for _ in range(10):  # 最多10层
+        stripped = re.sub(r'^\[[^\]]+\]\s*', '', clean)
+        if stripped == clean:
+            break
+        clean = stripped
+
+    return {
+        "layer": layer,
+        "layer_def": layer_def,
+        "score": score,
+        "clean_text": clean.strip(),
+        "files": files
+    }
+
+
+def lookup_session_snippets(filepath, keyword, max_snippets=6):
+    """在 session 文件中搜索相关片段，返回自然对话 + toolResult"""
+    snippets = []
+    if not os.path.exists(filepath):
+        return snippets
+
+    try:
+        with open(filepath) as f:
+            lines = f.readlines()
+
+        # 收集所有自然对话和 toolResult
+        relevant_messages = []
+        for i, line in enumerate(lines):
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+                event_type = obj.get("type", "")
+
+                if event_type == "message":
+                    msg = obj.get("message", {})
+                    role = msg.get("role", "")
+                    content_arr = msg.get("content", [])
+
+                    if isinstance(content_arr, list) and content_arr:
+                        text = content_arr[0].get("text", "") if isinstance(content_arr[0], dict) else str(content_arr[0])
+                    else:
+                        text = str(content_arr)
+
+                    # 保留：user, assistant, toolResult
+                    if role in ("user", "assistant", "toolResult"):
+                        relevant_messages.append({
+                            "role": role,
+                            "text": text,
+                            "index": i
+                        })
+            except:
+                continue
+
+        # 找包含 keyword 的消息位置
+        keyword_matches = []
+        for msg in relevant_messages:
+            if keyword and keyword[:15].lower() in msg["text"].lower():
+                keyword_matches.append(msg["index"])
+
+        # 取最近2个匹配位置，每个取前后各3条消息
+        for idx in keyword_matches[-2:]:
+            start = max(0, idx - 3)
+            end = min(len(relevant_messages), idx + 3)
+            context_msgs = relevant_messages[start:end]
+
+            lines_out = []
+            for m in context_msgs:
+                role_icon = {"user": "👤", "assistant": "🤖", "toolResult": "🔧"}.get(m["role"], "?")
+                text = m["text"].strip()
+                # 过滤掉过长和噪音
+                if text and len(text) < 300:
+                    lines_out.append(f"{role_icon} {text[:150]}")
+
+            if lines_out:
+                snippets.append(f"[{os.path.basename(filepath)}]\n" + "\n".join(lines_out[:6]))
+
+    except Exception as e:
+        pass
+
+    return snippets
+
+
+
+
+def get_session_context(parsed, max_files=2, max_snippets_per_file=3):
+    """根据 block 中的 files 路径，获取完整的 session 上下文"""
+    contexts = []
+    files = parsed.get("files", [])
+    clean_text = parsed.get("clean_text", "")
+
+    for filepath in files[:max_files]:
+        snippets = lookup_session_snippets(filepath, clean_text[:20], max_snippets=max_snippets_per_file)
+        contexts.extend(snippets)
+
+    return contexts
+
+
+def format_layer_section(layer, items):
+    """格式化单个层级 section"""
+    icon = LAYER_ICONS.get(layer, "❓")
+    layer_name = LAYER_NAMES_CN.get(layer, "未知层")
+    layer_def = LAYER_DEFINITIONS.get(layer, "")
+
+    lines = [f"\n{icon} **{layer_name}** — {layer_def}"]
+    lines.append("")
+
+    for i, item in enumerate(items):
+        text = item["clean_text"]
+        score = item["score"]
+        lines.append(f"  • {text} [score={score}]")
+
+        # 添加 session 上下文
+        contexts = item.get("contexts", [])
+        if contexts:
+            for ctx in contexts[:2]:  # 最多2个文件
+                ctx_lines = ctx.split("\n")
+                if len(ctx_lines) >= 2:
+                    lines.append(f"    └ {ctx_lines[0]}")  # 文件名
+                    for cl in ctx_lines[1:4]:  # 最多3条消息
+                        if cl.strip():
+                            lines.append(f"      {cl.strip()}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def auto_recall(query, min_score=2, limit=8):
+    """
+    搜索记忆，按层级分组，返回完整上下文
+    返回结构化文本供 AI 塞入 context
+    """
+    agent = os.environ.get("AGENT_NAME", "main")
+    collection = f"mem0_{agent}"
+
+    try:
+        m = get_mem0(collection)
+        results = m.search(
+            query=query,
+            user_id=os.environ.get("MEM0_USER_ID", "fuge"),
+            limit=limit
+        )
+        memories = results.get("results", [])
+    except Exception as e:
+        return f"搜索失败: {e}"
+
+    if not memories:
+        return ""
+
+    # 解析 + 过滤
+    parsed = []
+    for mem in memories:
+        p = parse_memory(mem.get("memory", ""))
+        if p["score"] >= min_score:
+            parsed.append(p)
+
+    if not parsed:
+        return ""
+
+    # 按层级分组
+    by_layer = defaultdict(list)
+    for p in parsed:
+        layer = p.get("layer", "unknown")
+        by_layer[layer].append(p)
+
+    # 每个 item 补充 session 上下文
+    for layer in by_layer:
+        for item in by_layer[layer]:
+            item["contexts"] = get_session_context(item)
+
+    # 格式化输出
+    sections = []
+    for layer in ["semantic", "episodic", "procedural"]:
+        if by_layer[layer]:
+            sections.append(format_layer_section(layer, by_layer[layer]))
+
+    if not sections:
+        return ""
+
+    header = "## 📚 相关记忆（按层级分类）"
+    return header + "\n".join(sections)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("用法: auto_recall.py <查询内容> [min_score] [limit]")
+        sys.exit(1)
+
+    query = sys.argv[1]
+    min_score = int(sys.argv[2]) if len(sys.argv) > 2 else 2
+    limit = int(sys.argv[3]) if len(sys.argv) > 3 else 8
+
+    result = auto_recall(query, min_score=min_score, limit=limit)
+    if result:
+        print(result)
+    else:
+        print("未找到相关记忆")
