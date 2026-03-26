@@ -1,4 +1,5 @@
-# Mem0 Agent Setup
+# openclaw memory solution #
+# 基于Mem0的openclaw长期记忆本地化解决方案 #
 
 > 🦋 **Agent 必读**：[AGENT_GUIDE.md](AGENT_GUIDE.md) — 面向 AI Agent 的配置指引，帮助你理解系统架构、多 Agent 环境检查方法、以及如何接入新 Agent。
 
