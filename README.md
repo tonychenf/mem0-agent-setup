@@ -167,6 +167,23 @@ WORKSPACE_DIR 路径推导 > AGENT_NAME 环境变量 > fallback "main"
 - [AGENT_GUIDE.md](AGENT_GUIDE.md) — AI Agent 配置指引
 - [飞书文档](https://www.feishu.cn/docx/L0HldmlNSobggfxAohFcRL2nnSh)
 
+## 日志目录
+
+每次 cron 执行自动记录到日志文件：
+
+| 日志位置 | 内容 |
+|---------|------|
+| `/root/.openclaw/cron_log/cleanup_{agent}.log` | cleanup START/END 标记 + 脚本输出 |
+| `/root/.openclaw/cron_log/distill_{agent}.log` | distill START/END 标记 + 脚本输出 |
+| `/root/.openclaw/workspace/logs/distill_{agent}.log` | distill 详细输出（每批处理、blocks 生成情况） |
+
+日志格式：
+```
+2026-03-26 03:00:12 CLEANUP main START
+没有记忆需要清理
+2026-03-26 03:00:15 CLEANUP main END
+```
+
 ## License
 
 MIT
