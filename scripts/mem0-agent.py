@@ -8,54 +8,80 @@ import sys
 import yaml
 import subprocess
 
-CONFIG_FILE = "/root/.openclaw/workspace/config.yaml"
+def get_agent():
+    """从环境变量获取当前 agent"""
+    return os.environ.get('AGENT_NAME', 'main')
+
+def get_config_path(agent):
+    """根据 agent 名称返回对应配置文件路径"""
+    if agent == 'main':
+        return "/root/.openclaw/workspace/config.yaml"
+    else:
+        return f"/root/.openclaw/workspace-{agent}/config.yaml"
 
 def load_config():
     """加载配置文件"""
-    if not os.path.exists(CONFIG_FILE):
-        print(f"配置文件不存在: {CONFIG_FILE}")
+    agent = get_agent()
+    config_file = get_config_path(agent)
+    if not os.path.exists(config_file):
+        print(f"配置文件不存在: {config_file}")
         print("请复制 config/config.yaml.example 为 config.yaml")
         sys.exit(1)
     
-    with open(CONFIG_FILE, 'r') as f:
+    with open(config_file, 'r') as f:
         return yaml.safe_load(f)
+
+def get_service_name(agent=None):
+    """获取指定 agent 的 systemd 服务名"""
+    if agent is None:
+        agent = get_agent()
+    return f'openclaw-session-watch@{agent}.service'
 
 def cmd_status(args):
     """查看状态"""
     config = load_config()
     agent_id = config.get('agent', {}).get('id', 'main')
+    service = get_service_name(agent_id)
     
     # 检查 systemd 服务
     result = subprocess.run(
-        ['systemctl', 'status', f'openclaw-session-watch'],
+        ['systemctl', 'status', service],
         capture_output=True
     )
     
     if result.returncode == 0:
         print(f"✅ 服务运行中 (Agent: {agent_id})")
-        subprocess.run(['systemctl', 'status', f'openclaw-session-watch', '--no-pager'])
+        subprocess.run(['systemctl', 'status', service, '--no-pager'])
     else:
         print(f"❌ 服务未运行 (Agent: {agent_id})")
 
 def cmd_start(args):
     """启动服务"""
-    subprocess.run(['systemctl', 'start', 'openclaw-session-watch'])
-    print("✅ 服务已启动")
+    agent = get_agent()
+    service = get_service_name(agent)
+    subprocess.run(['systemctl', 'start', service])
+    print(f"✅ {service} 已启动")
 
 def cmd_stop(args):
     """停止服务"""
-    subprocess.run(['systemctl', 'stop', 'openclaw-session-watch'])
-    print("✅ 服务已停止")
+    agent = get_agent()
+    service = get_service_name(agent)
+    subprocess.run(['systemctl', 'stop', service])
+    print(f"✅ {service} 已停止")
 
 def cmd_restart(args):
     """重启服务"""
-    subprocess.run(['systemctl', 'restart', 'openclaw-session-watch'])
-    print("✅ 服务已重启")
+    agent = get_agent()
+    service = get_service_name(agent)
+    subprocess.run(['systemctl', 'restart', service])
+    print(f"✅ {service} 已重启")
 
 def cmd_logs(args):
     """查看日志"""
+    agent = get_agent()
+    service = get_service_name(agent)
     lines = args.lines if hasattr(args, 'lines') else 50
-    subprocess.run(['journalctl', '-u', 'openclaw-session-watch', '-n', str(lines), '-f'])
+    subprocess.run(['journalctl', '-u', service, '-n', str(lines), '-f'])
 
 def cmd_stats(args):
     """查看记忆统计"""
@@ -354,7 +380,7 @@ def cmd_distill(args):
 
     for b in new_blocks:
         try:
-            m.add([{'role': 'user', 'content': b}], user_id='fuge', agent_id='main', infer=True)
+            m.add([{'role': 'user', 'content': b}], user_id=os.environ.get("MEM0_USER_ID", "user"), agent_id='main', infer=True)
             time.sleep(0.3)
         except Exception as e:
             print(f"Write error: {e}")

@@ -8,54 +8,80 @@ import sys
 import yaml
 import subprocess
 
-CONFIG_FILE = "/root/.openclaw/workspace/config.yaml"
+def get_agent():
+    """从环境变量获取当前 agent"""
+    return os.environ.get('AGENT_NAME', 'main')
+
+def get_config_path(agent):
+    """根据 agent 名称返回对应配置文件路径"""
+    if agent == 'main':
+        return "/root/.openclaw/workspace/config.yaml"
+    else:
+        return f"/root/.openclaw/workspace-{agent}/config.yaml"
 
 def load_config():
     """加载配置文件"""
-    if not os.path.exists(CONFIG_FILE):
-        print(f"配置文件不存在: {CONFIG_FILE}")
+    agent = get_agent()
+    config_file = get_config_path(agent)
+    if not os.path.exists(config_file):
+        print(f"配置文件不存在: {config_file}")
         print("请复制 config/config.yaml.example 为 config.yaml")
         sys.exit(1)
     
-    with open(CONFIG_FILE, 'r') as f:
+    with open(config_file, 'r') as f:
         return yaml.safe_load(f)
+
+def get_service_name(agent=None):
+    """获取指定 agent 的 systemd 服务名"""
+    if agent is None:
+        agent = get_agent()
+    return f'openclaw-session-watch@{agent}.service'
 
 def cmd_status(args):
     """查看状态"""
     config = load_config()
     agent_id = config.get('agent', {}).get('id', 'main')
+    service = get_service_name(agent_id)
     
     # 检查 systemd 服务
     result = subprocess.run(
-        ['systemctl', 'status', f'openclaw-session-watch'],
+        ['systemctl', 'status', service],
         capture_output=True
     )
     
     if result.returncode == 0:
         print(f"✅ 服务运行中 (Agent: {agent_id})")
-        subprocess.run(['systemctl', 'status', f'openclaw-session-watch', '--no-pager'])
+        subprocess.run(['systemctl', 'status', service, '--no-pager'])
     else:
         print(f"❌ 服务未运行 (Agent: {agent_id})")
 
 def cmd_start(args):
     """启动服务"""
-    subprocess.run(['systemctl', 'start', 'openclaw-session-watch'])
-    print("✅ 服务已启动")
+    agent = get_agent()
+    service = get_service_name(agent)
+    subprocess.run(['systemctl', 'start', service])
+    print(f"✅ {service} 已启动")
 
 def cmd_stop(args):
     """停止服务"""
-    subprocess.run(['systemctl', 'stop', 'openclaw-session-watch'])
-    print("✅ 服务已停止")
+    agent = get_agent()
+    service = get_service_name(agent)
+    subprocess.run(['systemctl', 'stop', service])
+    print(f"✅ {service} 已停止")
 
 def cmd_restart(args):
     """重启服务"""
-    subprocess.run(['systemctl', 'restart', 'openclaw-session-watch'])
-    print("✅ 服务已重启")
+    agent = get_agent()
+    service = get_service_name(agent)
+    subprocess.run(['systemctl', 'restart', service])
+    print(f"✅ {service} 已重启")
 
 def cmd_logs(args):
     """查看日志"""
+    agent = get_agent()
+    service = get_service_name(agent)
     lines = args.lines if hasattr(args, 'lines') else 50
-    subprocess.run(['journalctl', '-u', 'openclaw-session-watch', '-n', str(lines), '-f'])
+    subprocess.run(['journalctl', '-u', service, '-n', str(lines), '-f'])
 
 def cmd_stats(args):
     """查看记忆统计"""
@@ -133,6 +159,77 @@ def cmd_search(args):
         print(f"{i}. {r['memory'][:100]}...")
         print()
 
+
+def cmd_lookup(args):
+    """在指定 session 文件中查找相关对话片段"""
+    import os, sys, json, re
+    os.environ['OPENAI_API_KEY'] = os.environ.get('OPENAI_API_KEY') or ''
+    if not os.environ.get('OPENAI_API_KEY'):
+        print("ERROR: set OPENAI_API_KEY"); sys.exit(1)
+
+    from openai import OpenAI
+    API_KEY = os.environ['OPENAI_API_KEY']
+    BASE_URL = 'https://api.siliconflow.cn/v1'
+
+    session_id = args.session
+    keyword = args.keyword
+
+    # 找到 session 文件
+    import glob
+    pattern = f"/root/.openclaw/agents/main/sessions/{session_id}*.jsonl"
+    files = glob.glob(pattern)
+
+    if not files:
+        # 尝试只用 session_id 匹配
+        all_files = glob.glob("/root/.openclaw/agents/main/sessions/*.jsonl")
+        for f in all_files:
+            if session_id in f:
+                files = [f]
+                break
+
+    if not files:
+        print(f"Session file not found: {session_id}")
+        sys.exit(1)
+
+    filepath = files[0]
+    print(f"Searching in: {filepath}")
+    print(f"Keyword: {keyword}")
+    print()
+
+    # 读取 session 文件
+    snippets = []
+    with open(filepath) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line.strip())
+                if obj.get('type') == 'message':
+                    msg = obj.get('message', {})
+                    role = msg.get('role', '')
+                    content = msg.get('content', '')
+                    if isinstance(content, list):
+                        content = ' '.join(c.get('text','') for c in content if c.get('type')=='text')
+                    if role in ('user', 'assistant') and content.strip():
+                        # 提纯 user 内容
+                        if role == 'user' and content.startswith('System:'):
+                            m = re.search(r'Sender \(untrusted metadata\):[\s\S]+?\n\n([\s\S]+)$', content)
+                            if m and m.group(1).strip():
+                                content = m.group(1).strip()
+                        if keyword.lower() in content.lower():
+                            snippets.append(f"[{role.upper()}] {content[:300]}")
+            except:
+                pass
+
+    if not snippets:
+        print("No matching content found")
+        return
+
+    print(f"找到 {len(snippets)} 条相关片段：\n")
+    for s in snippets:
+        print(s)
+        print()
+
 def main():
     parser = argparse.ArgumentParser(description='Mem0 Agent 命令行工具')
     subparsers = parser.add_subparsers(dest='command', help='命令')
@@ -160,9 +257,17 @@ def main():
     search_parser = subparsers.add_parser('search', help='搜索记忆')
     search_parser.add_argument('query', help='搜索关键词')
     search_parser.add_argument('--limit', type=int, default=5, help='结果数量')
-    
+
+    # distill
+    distill_parser = subparsers.add_parser('distill', help='精炼记忆（生成浓缩块）')
+
+    # lookup
+    lookup_parser = subparsers.add_parser('lookup', help='在 session 文件中查找相关片段')
+    lookup_parser.add_argument('--session', required=True, help='Session ID（如 7a31f376）')
+    lookup_parser.add_argument('--keyword', required=True, help='搜索关键词')
+
     args = parser.parse_args()
-    
+
     if args.command == 'status':
         cmd_status(args)
     elif args.command == 'start':
@@ -177,8 +282,109 @@ def main():
         cmd_stats(args)
     elif args.command == 'search':
         cmd_search(args)
+    elif args.command == 'distill':
+        cmd_distill(args)
+    elif args.command == 'lookup':
+        cmd_lookup(args)
     else:
         parser.print_help()
+
+
+
+def cmd_distill(args):
+    """精炼记忆 - 将碎片合并为浓缩的 [block]"""
+    import os, sys, re, time
+    os.environ['OPENAI_API_KEY'] = os.environ.get('OPENAI_API_KEY') or ''
+    if not os.environ.get('OPENAI_API_KEY'):
+        print("ERROR: set OPENAI_API_KEY env"); sys.exit(1)
+
+    from qdrant_client import QdrantClient
+    from openai import OpenAI
+    from mem0 import Memory
+
+    API_KEY = os.environ['OPENAI_API_KEY']
+    BASE_URL = 'https://api.siliconflow.cn/v1'
+    COLLECTION = 'mem0_main'
+    client = QdrantClient(url='http://localhost:6333')
+
+    print("Reading all records...")
+    records = []
+    offset = None
+    while True:
+        result = client.scroll(collection_name=COLLECTION, limit=200, offset=offset)
+        if not result[0]: break
+        for p in result[0]:
+            records.append({'id': p.id, 'data': p.payload.get('data', '')})
+        offset = result[1]
+        if offset is None: break
+
+    print(f"Total: {len(records)} records")
+
+    groups = {'episodic': [], 'semantic': [], 'procedural': []}
+    for r in records:
+        m_type = re.search(r'\[(episodic|semantic|procedural)\]', r['data'])
+        if '[distilled]' in r['data'] or not m_type:
+            continue
+        clean = re.sub(r'^\[[^\]]+\]\[score:\d+\]\s*', '', r['data']).strip()
+        if clean:
+            groups[m_type.group(1)].append({'id': r['id'], 'clean': clean})
+
+    print(f"Groups: episodic={len(groups['episodic'])} semantic={len(groups['semantic'])} procedural={len(groups['procedural'])}")
+
+    prompts = {
+        'episodic': "以下是从对话中提取的事件记忆片段，请将相关的合并为1-3条独立的自然语言陈述，每条一个主题：\n{block_list}\n\n要求：格式：[block] 完整陈述，多个主题分开。不要解释，只输出block列表。",
+        'semantic': "以下是从对话中提取的事实和偏好记忆片段，请将相关的合并为1-3条独立的自然语言陈述，每条一个主题：\n{block_list}\n\n要求：格式：[block] 完整陈述，多个主题分开。不要解释，只输出block列表。",
+        'procedural': "以下是从对话中提取的流程和方法记忆片段，请将相关的合并为1-3条独立的自然语言陈述，每条一个主题：\n{block_list}\n\n要求：格式：[block] 完整陈述，多个主题分开。不要解释，只输出block列表。",
+    }
+
+    llm_client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+
+    new_blocks = []
+    for mtype, grp in groups.items():
+        if not grp:
+            print(f"[{mtype}] no records, skip")
+            continue
+        sample = grp[:20]
+        block_list = '\n'.join([f"{i+1}. {r['clean']}" for i, r in enumerate(sample)])
+        prompt = prompts[mtype].format(block_list=block_list)
+        try:
+            resp = llm_client.chat.completions.create(
+                model='Qwen/Qwen2.5-7B-Instruct',
+                messages=[{'role': 'user', 'content': prompt}],
+                temperature=0.3
+            )
+            text = resp.choices[0].message.content.strip()
+            blocks = re.findall(r'\[block\]\s*(.+)', text)
+            print(f"[{mtype}] generated {len(blocks)} blocks")
+            for b in blocks:
+                new_blocks.append(f"[{mtype}][distilled] {b.strip()}")
+                print(f"  - {b.strip()[:80]}")
+        except Exception as e:
+            print(f"[{mtype}] LLM error: {e}")
+
+    if not new_blocks:
+        print("No blocks generated, aborting")
+        return
+
+    print(f"\nTotal: {len(new_blocks)} distill blocks")
+    confirm = input("Write to mem0? (y/n): ")
+    if confirm.strip().lower() != 'y':
+        print("Cancelled")
+        return
+
+    m = Memory.from_config({
+        'vector_store': {'provider': 'qdrant', 'config': {'host': 'localhost', 'port': 6333, 'collection_name': COLLECTION, 'embedding_model_dims': 1024}},
+        'llm': {'provider': 'openai', 'config': {'model': 'Qwen/Qwen2.5-7B-Instruct', 'openai_base_url': BASE_URL, 'temperature': 0.1}},
+        'embedder': {'provider': 'openai', 'config': {'model': 'BAAI/bge-large-zh-v1.5', 'openai_base_url': BASE_URL, 'embedding_dims': 1024}}
+    })
+
+    for b in new_blocks:
+        try:
+            m.add([{'role': 'user', 'content': b}], user_id=os.environ.get("MEM0_USER_ID", "user"), agent_id='main', infer=True)
+            time.sleep(0.3)
+        except Exception as e:
+            print(f"Write error: {e}")
+    print(f"Done! {len(new_blocks)} distill blocks written")
 
 if __name__ == '__main__':
     main()
