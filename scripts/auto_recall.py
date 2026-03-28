@@ -256,12 +256,12 @@ def get_session_context(parsed, max_files=DEFAULT_MAX_FILES_PER_BLOCK, max_snipp
     return contexts
 
 
-def get_current_session_path():
+def get_current_session_path(agent=None):
     """
     找到当前活跃的 session 文件路径
     通过 sessions.json 找到最近更新的 session（按 updatedAt）
     """
-    agent = get_agent_id()
+    agent = agent or get_agent_id()
     sessions_json = f"/root/.openclaw/agents/{agent}/sessions/sessions.json"
     if not os.path.exists(sessions_json):
         return None
@@ -303,7 +303,7 @@ def get_realtime_context(agent, max_msgs=30):
     delta = now - timedelta(hours=24)
 
     # 1. 当前活跃 session 文件（未写入 Qdrant）
-    current_session = get_current_session_path()
+    current_session = get_current_session_path(agent)
     if current_session:
         msgs = _load_session_messages(current_session, max_msgs)
         if msgs:
@@ -442,7 +442,7 @@ def format_recall_output(by_layer):
     return "".join(output_parts).strip()
 
 
-def auto_recall(query, min_score=DEFAULT_MIN_SCORE, limit=DEFAULT_LIMIT):
+def auto_recall(query, min_score=DEFAULT_MIN_SCORE, limit=DEFAULT_LIMIT, agent=None):
     """
     搜索记忆，按层级分组，扁平输出
 
@@ -457,7 +457,7 @@ def auto_recall(query, min_score=DEFAULT_MIN_SCORE, limit=DEFAULT_LIMIT):
     Returns:
         格式化后的记忆文本
     """
-    agent = get_agent_id()
+    agent = agent or get_agent_id()
 
     # v7: 生成 query embedding，然后调 Qdrant 过滤搜索
     try:
@@ -512,15 +512,15 @@ def auto_recall(query, min_score=DEFAULT_MIN_SCORE, limit=DEFAULT_LIMIT):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("用法: auto_recall.py <查询内容> [min_score] [limit]")
-        sys.exit(1)
+    import argparse
+    parser = argparse.ArgumentParser(description="auto_recall - 记忆检索")
+    parser.add_argument("query", help="搜索关键词")
+    parser.add_argument("min_score", nargs="?", type=int, default=DEFAULT_MIN_SCORE, help=f"最低分数阈值（默认 {DEFAULT_MIN_SCORE}）")
+    parser.add_argument("limit", nargs="?", type=int, default=DEFAULT_LIMIT, help=f"最多返回条数（默认 {DEFAULT_LIMIT}）")
+    parser.add_argument("--agent", dest="agent", default=None, help="指定 agent（默认从环境变量推导）")
+    args = parser.parse_args()
 
-    query = sys.argv[1]
-    min_score = int(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_MIN_SCORE
-    limit = int(sys.argv[3]) if len(sys.argv) > 3 else DEFAULT_LIMIT
-
-    result = auto_recall(query, min_score=min_score, limit=limit)
+    result = auto_recall(args.query, min_score=args.min_score, limit=args.limit, agent=args.agent)
     if result:
         print(result)
     else:
