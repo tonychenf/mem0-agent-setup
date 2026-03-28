@@ -213,6 +213,12 @@ WORKSPACE_DIR 路径推导 > AGENT_NAME 环境变量 > fallback "main"
 
 ## 更新日志
 
+### v8 (2026-03-28)
+- `auto_recall.py`：Step 4 + Step 5 改进，实现 Active Recall
+  - Step 4：**加载整个 session 文件**（移除 keyword 匹配，直接读取完整内容）
+  - Step 5：**加载 24h 内 realtime 对话**（当前 session 文件 + Qdrant 实时数据）
+  - 召回输出 = 历史蒸馏记忆 + 当前实时对话
+
 ### v7 (2026-03-28)
 - `auto_recall.py`：Qdrant REST API + layer 过滤，只搜 distilled block
   - 替换 mem0.search() 为直接 Qdrant API
