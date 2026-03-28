@@ -22,6 +22,16 @@ RECORD_COLLECTION = "distill_session_records"
 _API_KEY = None
 _BASE_URL = "https://api.siliconflow.cn/v1"
 
+# ========== .env 自动加载 ==========
+_ENV_PATH = "/root/.openclaw/mem0-agent-setup/.env"
+if os.path.exists(_ENV_PATH):
+    with open(_ENV_PATH) as f:
+        for line in f:
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                os.environ[k.strip()] = v.strip()
+
 def _get_api_key():
     global _API_KEY
     if _API_KEY is None:

@@ -11,6 +11,16 @@ import os
 import re
 from datetime import datetime, timedelta
 
+# .env 自动加载
+_ENV_PATH = "/root/.openclaw/mem0-agent-setup/.env"
+if os.path.exists(_ENV_PATH):
+    with open(_ENV_PATH) as f:
+        for line in f:
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                os.environ[k.strip()] = v.strip()
+
 if 'OPENAI_API_KEY' not in os.environ:
     raise RuntimeError("请设置环境变量 OPENAI_API_KEY")
 
