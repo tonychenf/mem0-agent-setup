@@ -8,6 +8,7 @@ auto_recall - 自动记忆读取（v7）
 - v7: 直接调 Qdrant REST API + layer 过滤，只搜 distilled block
 """
 import os, sys, re, json, time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from collections import defaultdict
 
@@ -169,15 +170,16 @@ def parse_memory(text):
     }
 
 
-def lookup_session_snippets(filepath, keyword, max_snippets=6):
+def lookup_session_snippets(filepath, keyword=None, max_snippets=6):
     """
-    在 session JSONL 文件中搜索相关片段
+    读取 session JSONL 文件的完整内容（Step 4 改进）
+    不再依赖 keyword 匹配，直接返回整个 session 的消息（限最新 N 条）
+
     返回格式：[filename]\nicon text\nicon text\n...
     """
     if not filepath or not os.path.exists(filepath):
         return []
 
-    snippets = []
     role_icon_map = {
         "user": "👤",
         "assistant": "🤖",
@@ -222,30 +224,16 @@ def lookup_session_snippets(filepath, keyword, max_snippets=6):
     if not relevant_messages:
         return []
 
-    keyword_lower = keyword.lower() if keyword else ""
-    matched_indices = []
-    for i, msg in enumerate(relevant_messages):
-        if keyword_lower and keyword_lower in msg["text"].lower():
-            matched_indices.append(i)
+    # Step 4: 返回完整 session（不限 keyword），取最新消息
+    MAX_SESSION_MSGS = 50
+    session_msgs = relevant_messages[-MAX_SESSION_MSGS:]
 
-    if not matched_indices:
-        matched_indices = [len(relevant_messages) - 1]
-
-    collected = set()
-    for idx in matched_indices[-max_snippets:]:
-        start = max(0, idx - 2)
-        end = min(len(relevant_messages), idx + 3)
-        for i in range(start, end):
-            if i not in collected:
-                msg = relevant_messages[i]
-                collected.add(i)
-                snippets.append(f"{msg['icon']} {msg['text']}")
-
-    if not snippets:
-        return []
+    snippets = []
+    for msg in session_msgs:
+        snippets.append(f"{msg['icon']} {msg['text']}")
 
     filename = os.path.basename(filepath)
-    return [f"[{filename}]\n" + "\n".join(snippets[:6])]
+    return [f"[{filename}]\n" + "\n".join(snippets[:max_snippets])]
 
 
 def get_session_context(parsed, max_files=DEFAULT_MAX_FILES_PER_BLOCK, max_snippets_per_file=DEFAULT_MAX_CONTEXTS_PER_FILE):
@@ -257,14 +245,137 @@ def get_session_context(parsed, max_files=DEFAULT_MAX_FILES_PER_BLOCK, max_snipp
         return []
 
     files = parsed.get("files", [])
-    keyword = parsed.get("clean_text", "")[:20]
-
+    # Step 4: 不再依赖 keyword，直接加载完整 session
     contexts = []
     for filepath in files[:max_files]:
-        ctx_list = lookup_session_snippets(filepath, keyword, max_snippets=max_snippets_per_file)
+        ctx_list = lookup_session_snippets(filepath, max_snippets=max_snippets_per_file)
         contexts.extend(ctx_list)
 
     return contexts
+
+
+def get_current_session_path():
+    """
+    找到当前活跃的 session 文件路径
+    通过 sessions.json 获取当前 session ID
+    """
+    agent = get_agent_id()
+    sessions_json = f"/root/.openclaw/agents/{agent}/sessions/sessions.json"
+    if not os.path.exists(sessions_json):
+        return None
+    try:
+        with open(sessions_json) as f:
+            data = json.load(f)
+        current_id = data.get("current")
+        if current_id:
+            session_file = f"/root/.openclaw/agents/{agent}/sessions/{current_id}.jsonl"
+            if os.path.exists(session_file):
+                return session_file
+    except Exception:
+        pass
+    return None
+
+
+def get_realtime_context(agent, max_msgs=30):
+    """
+    Step 5: 加载向量库中最近 24 小时的 realtime 对话
+    + 当前活跃 session 文件
+
+    Realtime 数据特征：
+    - role = 'user' 或 'assistant'（来自 sync_to_mem0）
+    - data 不含 [层级:] 蒸馏标记（排除旧版 distillation blocks）
+    - 来自当前 session 文件（未写入 Qdrant）
+
+    返回格式：[realtime session file]\nicon text\nicon text\n...
+           [Qdrant realtime]\nicon text\nicon text\n...
+    """
+    contexts = []
+    now = datetime.now(timezone.utc)
+    delta = now - timedelta(hours=24)
+
+    # 1. 当前活跃 session 文件（未写入 Qdrant）
+    current_session = get_current_session_path()
+    if current_session:
+        msgs = _load_session_messages(current_session, max_msgs)
+        if msgs:
+            ctx_lines = [f"[当前 Session]\n"]
+            for msg in msgs[-max_msgs:]:
+                ctx_lines.append(f"{msg['icon']} {msg['text']}")
+            contexts.append("\n".join(ctx_lines[:max_msgs + 1]))
+
+    # 2. Qdrant 中最近 24h 的 realtime 数据（排除蒸馏 blocks）
+    collection = f"mem0_{agent}"
+    zero_vec = [0.0] * 1024
+    url = f"http://localhost:6333/collections/{collection}/points/search"
+
+    body = {
+        "vector": zero_vec,
+        "limit": 20,
+        "filter": {
+            "must": [
+                {"key": "agent_id", "match": {"any": [agent]}},
+                {"key": "role", "match": {"any": ["user", "assistant"]}}
+            ]
+        },
+        "with_payload": True
+    }
+
+    try:
+        resp = requests.post(url, headers={"Content-Type": "application/json"}, json=body)
+        result = resp.json()
+        if result.get("status") == "ok":
+            pts = result.get("result", [])
+            # 过滤：排除含 [层级:] 的蒸馏 blocks
+            realtime_msgs = []
+            for p in pts:
+                pl = p.get("payload", {})
+                data = pl.get("data", "")
+                # 排除蒸馏 blocks（含有 [层级: 或 [semantic] 等标记）
+                if "[层级:" in data or "[semantic]" in data.lower() or "[episodic]" in data.lower() or "[procedural]" in data.lower():
+                    continue
+                role = pl.get("role", "")
+                icon = {"user": "👤", "assistant": "🤖"}.get(role, "📄")
+                realtime_msgs.append(f"{icon} {data[:MAX_CTX_MSG_LEN]}")
+
+            if realtime_msgs:
+                contexts.append("[Qdrant 24h]\n" + "\n".join(realtime_msgs[:max_msgs]))
+    except Exception:
+        pass
+
+    return contexts
+
+
+def _load_session_messages(filepath, max_msgs=50):
+    """读取 session 文件，返回消息列表"""
+    role_icon_map = {"user": "👤", "assistant": "🤖", "toolResult": "🔧"}
+    messages = []
+    try:
+        with open(filepath, encoding="utf-8") as f:
+            lines = f.readlines()
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                if obj.get("type") != "message":
+                    continue
+                msg = obj.get("message", {})
+                role = msg.get("role", "")
+                if role not in role_icon_map:
+                    continue
+                content_arr = msg.get("content", [])
+                if isinstance(content_arr, list) and content_arr:
+                    text = content_arr[0].get("text", "") if isinstance(content_arr[0], dict) else str(content_arr[0])
+                else:
+                    text = str(content_arr)
+                if text:
+                    messages.append({"role": role, "text": text[:MAX_CTX_MSG_LEN], "icon": role_icon_map[role]})
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return messages
 
 
 def format_recall_output(by_layer):
@@ -372,13 +483,23 @@ def auto_recall(query, min_score=DEFAULT_MIN_SCORE, limit=DEFAULT_LIMIT):
     for p in parsed:
         by_layer[p["layer"]].append(p)
 
-    # 每条 block 补全 session 上下文
+    # 每条 block 补全 session 上下文（Step 4: 加载完整 session）
     for layer in by_layer:
         for item in by_layer[layer]:
             item["contexts"] = get_session_context(item)
 
+    # Step 5: 加载 realtime context（24h 内实时对话）
+    realtime_contexts = get_realtime_context(agent)
+
     # 格式化输出
-    return format_recall_output(by_layer)
+    output = format_recall_output(by_layer)
+
+    # 追加 realtime context
+    if realtime_contexts:
+        output += "\n\n--- 当前实时对话 ---\n\n"
+        output += "\n\n".join(realtime_contexts)
+
+    return output
 
 
 if __name__ == "__main__":
