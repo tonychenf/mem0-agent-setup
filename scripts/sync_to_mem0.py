@@ -188,29 +188,41 @@ def sync_messages(messages, agent_name: str = None) -> int:
             user = msg.get('user', '')[:500]
             assistant = msg.get('assistant', '')[:500]
             
-            # 初步过滤：太短的和系统消息
-            if len(user) < 10 or user.startswith('System:') or user.startswith('Conversation info'):
+            # 从 System 包装里提取真正的用户消息内容
+            # content 可能是字符串，也可能是列表（[{"type": "text", "text": "..."}]）
+            # 先提取纯文本
+            if isinstance(user, list):
+                # content 是列表，从中提取 text
+                for c in user:
+                    if isinstance(c, dict) and c.get('type') == 'text' and c.get('text', '').strip():
+                        user = c.get('text', '')
+                        break
+            
+            if isinstance(user, str) and user.startswith('System:'):
+                # 尝试提取消息正文（两个换行后的内容）
+                parts = user.split('\n\n')
+                if len(parts) >= 2:
+                    user = parts[-1].strip()  # 取最后一段（实际消息内容）
+                else:
+                    # 没有双换行，跳过 System: 行，取剩余内容
+                    lines = user.split('\n')
+                    content_lines = [l for l in lines if not l.startswith('System:') and not l.startswith('Conversation')]
+                    user = ' '.join(content_lines).strip()
+            
+            # 过滤：太短的不要（中文短语通常较短，5字符起步）
+            if len(user) < 5:
                 continue
             
-            # LLM 筛选和评分
-            evaluation = should_remember_and_score(user, assistant)
-            
-            if not evaluation['should_remember']:
-                continue  # 不值得记忆，跳过
-            
-            # 构建带评分和分类的记忆内容
-            score = evaluation['score']
-            mem_type = evaluation['type']
-            reason = evaluation['reason']
-            
-            # 格式：[type][score:N] 内容
-            enhanced_content = f"[{mem_type}][score:{score}] {user}"
+            # 直接写入：不过滤，保留所有 user + assistant 对话
+            # 格式：[realtime][score:3] 内容
+            enhanced_content = f"[realtime][score:3] {user}"
             
             m.add(
                 [{'role': 'user', 'content': enhanced_content}, {'role': 'assistant', 'content': assistant}],
                 user_id=os.environ.get("MEM0_USER_ID", "user"),
                 agent_id=agent_name,
-                infer=True
+                infer=False,
+                metadata={'layer': 'realtime'}
             )
             imported += 1
             

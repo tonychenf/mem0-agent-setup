@@ -59,13 +59,15 @@ import requests
 LAYER_DEFINITIONS = {
     "semantic": "回答请符合用户偏好、沟通习惯、语言风格",
     "episodic": "回答请参考用户的历史决策、重大事件",
-    "procedural": "回答请遵循用户认可的工作流程和操作步骤"
+    "procedural": "回答请遵循用户认可的工作流程和操作步骤",
+    "realtime": "实时捕获的原始记忆片段"
 }
 
 LAYER_SHORT_NAMES = {
     "semantic": "语义",
     "episodic": "事件",
     "procedural": "程序",
+    "realtime": "实时",
     "unknown": "未知"
 }
 
@@ -101,10 +103,8 @@ def embed_query(query_text):
 
 def qdrant_search(vec, agent, limit=8):
     """
-    直接调 Qdrant REST API，只搜有 layer 字段的 distilled block
-
-    过滤逻辑：layer IN ["Semantic", "Episodic", "Procedural"]
-    Realtime sync 数据没有 layer 字段，会被过滤掉
+    直接调 Qdrant REST API 语义搜索
+    搜索所有层级的记录：Semantic, Episodic, Procedural, Realtime
     """
     collection = f"mem0_{agent}"
     url = f"http://localhost:6333/collections/{collection}/points/search"
@@ -112,17 +112,7 @@ def qdrant_search(vec, agent, limit=8):
     body = {
         "vector": vec,
         "limit": limit,
-        "with_payload": True,
-        "filter": {
-            "must": [
-                {
-                    "key": "layer",
-                    "match": {
-                        "any": ["Semantic", "Episodic", "Procedural"]
-                    }
-                }
-            ]
-        }
+        "with_payload": True
     }
 
     try:
@@ -135,32 +125,91 @@ def qdrant_search(vec, agent, limit=8):
         raise RuntimeError(f"Qdrant search 失败: {e}")
 
 
+def fetch_recent_realtime(agent, limit=20):
+    """
+    获取最近 N 条 realtime 记录（按时序，不走向量搜索）
+    """
+    collection = f"mem0_{agent}"
+    url = f"http://localhost:6333/collections/{collection}/points/scroll"
+
+    all_points = []
+    offset = None
+    
+    while len(all_points) < 500:  # 最多扫500条
+        body = {"limit": 100, "offset": offset, "with_payload": True, "with_vectors": False}
+        try:
+            resp = requests.post(url, headers={"Content-Type": "application/json"}, json=body)
+            result = resp.json()
+            if result.get("status") != "ok":
+                break
+            points = result.get("result", {}).get("points", [])
+            if not points:
+                break
+            all_points.extend(points)
+            offset = result.get("result", {}).get("next_page_offset")
+            if offset is None:
+                break
+        except:
+            break
+
+    # 过滤 realtime（没有 [层级: 和 [distilled] 标签的）
+    # realtime 格式：[realtime][score:N] 内容
+    realtime_points = []
+    for p in all_points:
+        data = p.get("payload", {}).get("data", "")
+        if "[层级:" in data or "[distilled]" in data:
+            continue  # 跳过蒸馏数据
+        if re.search(r"\[(semantic|episodic|procedural)\]", data, re.IGNORECASE):
+            continue  # 跳过带层级标签的同步数据
+        realtime_points.append(p)
+
+    # 按 created_at 倒序，取最近 limit 条
+    realtime_points.sort(key=lambda p: p.get("payload", {}).get("created_at", ""), reverse=True)
+    
+    return [{
+        "id": p.get("id"),
+        "payload": p.get("payload", {})
+    } for p in realtime_points[:limit]]
+
+
 def parse_memory(text):
     """
     解析记忆 block，提取层级、分数、文件路径、纯文本
-    格式：[层级:Episodic][score:5][distilled][sessions:2][files:/path/a.jsonl,/path/b.jsonl]
-          {block_text}
+    支持两种格式：
+    - 蒸馏格式：[层级:Episodic][score:5][distilled][sessions:2][files:/path/a.jsonl]\n{block}
+    - 实时格式：[realtime][score:3] {content}
     """
     if not text or not isinstance(text, str):
         return None
 
-    layer_m = re.search(r'\[层级:(\w+)\]', text)
-    score_m = re.search(r'\[score:(\d+)\]', text)
-    files_m = re.search(r'\[files:([^\]]+)\]', text)
+    # 判断格式：蒸馏有 [层级: 或 [distilled]，其他是 realtime
+    is_distill = "[层级:" in text or "[distilled]" in text
 
-    layer = layer_m.group(1).lower() if layer_m else "unknown"
-    score = int(score_m.group(1)) if score_m else 0
-    files = []
-    if files_m and files_m.group(1).strip():
-        files = [f.strip() for f in files_m.group(1).split(",") if f.strip()]
+    if is_distill:
+        # 蒸馏格式解析
+        layer_m = re.search(r'\[层级:(\w+)\]', text)
+        score_m = re.search(r'\[score:(\d+)\]', text)
+        files_m = re.search(r'\[files:([^\]]+)\]', text)
 
+        layer = layer_m.group(1).lower() if layer_m else "unknown"
+        score = int(score_m.group(1)) if score_m else 0
+        files = []
+        if files_m and files_m.group(1).strip():
+            files = [f.strip() for f in files_m.group(1).split(",") if f.strip()]
+    else:
+        # 实时格式解析
+        score_m = re.search(r'\[score:(\d+)\]', text)
+        layer = "realtime"
+        score = int(score_m.group(1)) if score_m else 3
+        files = []
+
+    # 去掉所有 [标签] 前缀，得到纯文本
     clean = text
     for _ in range(10):
         stripped = re.sub(r'^\[[^\]]+\]\s*', '', clean)
         if stripped == clean:
             break
         clean = stripped
-
     clean = clean.strip()
 
     return {
@@ -184,8 +233,7 @@ def lookup_session_snippets(filepath, keyword=None, max_snippets=6):
 
     role_icon_map = {
         "user": "👤",
-        "assistant": "🤖",
-        "toolResult": "🔧"
+        "assistant": "🤖"
     }
 
     try:
@@ -213,6 +261,10 @@ def lookup_session_snippets(filepath, keyword=None, max_snippets=6):
                 text = content_arr[0].get("text", "") if isinstance(content_arr[0], dict) else str(content_arr[0])
             else:
                 text = str(content_arr)
+
+            # 跳过 System: 包装的消息
+            if text.startswith("System:"):
+                continue
 
             if text:
                 relevant_messages.append({
@@ -403,7 +455,7 @@ def format_recall_output(by_layer):
     """
     output_parts = ["## 📚 相关记忆\n"]
 
-    layer_order = ["semantic", "episodic", "procedural"]
+    layer_order = ["semantic", "episodic", "procedural", "realtime"]
 
     for layer in layer_order:
         items = by_layer.get(layer, [])
@@ -446,8 +498,10 @@ def auto_recall(query, min_score=DEFAULT_MIN_SCORE, limit=DEFAULT_LIMIT, agent=N
     """
     搜索记忆，按层级分组，扁平输出
 
-    v7: 直接调 Qdrant REST API + layer 过滤
-    只返回有 layer 字段的 distilled block（realtime sync 数据被过滤）
+    v8: Qdrant 语义搜索 + 最近20条 realtime 追加
+    - 语义搜索：返回相关度最高的记录（蒸馏+realtime混合）
+    - 追加最近20条 realtime：按时序无条件追加
+    - 蒸馏按分数过滤，realtime 不过滤
 
     Args:
         query: 搜索关键词
@@ -470,6 +524,7 @@ def auto_recall(query, min_score=DEFAULT_MIN_SCORE, limit=DEFAULT_LIMIT, agent=N
         return ""
 
     # 解析 + 过滤
+    # 语义搜索结果：蒸馏按分数过滤，realtime 不过滤
     parsed = []
     for p in points:
         payload = p.get("payload", {})
@@ -479,10 +534,29 @@ def auto_recall(query, min_score=DEFAULT_MIN_SCORE, limit=DEFAULT_LIMIT, agent=N
         parsed_item = parse_memory(text)
         if not parsed_item:
             continue
-        if parsed_item["score"] < min_score:
+        # 蒸馏按分数过滤，realtime 不过滤
+        if parsed_item["layer"] != "realtime" and parsed_item["score"] < min_score:
             continue
         parsed_item["_payload"] = payload
         parsed.append(parsed_item)
+
+    # 追加最近20条 realtime（按时序，不过滤）
+    try:
+        recent_realtime = fetch_recent_realtime(agent, limit=20)
+        for rp in recent_realtime:
+            payload = rp.get("payload", {})
+            text = payload.get("data", "")
+            if not text:
+                continue
+            # 去重：跳过已在语义搜索结果中的
+            if any(p.get("_payload", {}).get("id") == rp.get("id") for p in parsed):
+                continue
+            parsed_item = parse_memory(text)
+            if parsed_item:
+                parsed_item["_payload"] = payload
+                parsed.append(parsed_item)
+    except:
+        pass  # 出错不影响主流程
 
     if not parsed:
         return ""
@@ -492,21 +566,13 @@ def auto_recall(query, min_score=DEFAULT_MIN_SCORE, limit=DEFAULT_LIMIT, agent=N
     for p in parsed:
         by_layer[p["layer"]].append(p)
 
-    # 每条 block 补全 session 上下文（Step 4: 加载完整 session）
+    # 每条 block 补全 session 上下文
     for layer in by_layer:
         for item in by_layer[layer]:
             item["contexts"] = get_session_context(item)
 
-    # Step 5: 加载 realtime context（当前 session + 24h 内 Qdrant 实时）
-    realtime_contexts = get_realtime_context(agent)
-
     # 格式化输出
     output = format_recall_output(by_layer)
-
-    # 追加 realtime context
-    if realtime_contexts:
-        output += "\n\n--- 当前实时对话 ---\n\n"
-        output += "\n\n".join(realtime_contexts)
 
     return output
 
