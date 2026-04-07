@@ -367,6 +367,7 @@ def distill_batch(conversations_batch, llm_client):
 - 相同主题的内容合并为一个 block
 - 不重要的闲聊忽略
 - 每个 block 必须标注层级
+- **重要：每个 block 的内容不超过200字，越精简越好**
 
 格式（严格按此格式，每个 block 之间空一行）：
 [层级:Semantic|层级:Episodic|层级:Procedural]
@@ -489,12 +490,31 @@ def write_blocks(blocks_with_scores, qdrant_client, embed_api_key, agent, collec
         record = f"[层级:{layer}][score:{score}][distilled][sessions:{len(sessions)}][files:{files}]\n{block_text}"
 
         try:
+            # Truncate text if too long (SiliconFlow BGE has ~512 token limit ≈ 500 chars for Chinese)
+            # Header is ~100 chars, so block text should be ≤ 300 chars for safety
+            text_to_embed = record[:400] if len(record) > 400 else record
             resp = requests.post(
                 "https://api.siliconflow.cn/v1/embeddings",
                 headers={"Authorization": f"Bearer {embed_api_key}"},
-                json={"model": "BAAI/bge-large-zh-v1.5", "input": record}
+                json={"model": "BAAI/bge-large-zh-v1.5", "input": text_to_embed}
             )
+            if resp.status_code != 200:
+                print(f"  Embedding 失败: HTTP {resp.status_code} - {resp.text[:100]}")
+                continue
             data = resp.json()
+            if not data.get("data"):
+                print(f"  Embedding 失败: 空响应 (文本过长), status={resp.status_code}")
+                # Retry with much shorter text
+                text_to_embed = record[:200] if len(record) > 200 else record
+                resp = requests.post(
+                    "https://api.siliconflow.cn/v1/embeddings",
+                    headers={"Authorization": f"Bearer {embed_api_key}"},
+                    json={"model": "BAAI/bge-large-zh-v1.5", "input": text_to_embed}
+                )
+                if resp.status_code != 200 or not resp.json().get("data"):
+                    print(f"  Embedding 重试也失败: HTTP {resp.status_code}")
+                    continue
+                data = resp.json()
             vec = data["data"][0]["embedding"]
         except Exception as e:
             print(f"  Embedding 失败: {e}")
