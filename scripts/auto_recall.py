@@ -112,7 +112,17 @@ def qdrant_search(vec, agent, limit=8):
     body = {
         "vector": vec,
         "limit": limit,
-        "with_payload": True
+        "with_payload": True,
+        "filter": {
+            "must": [
+                {
+                    "key": "layer",
+                    "match": {
+                        "any": ["Semantic", "semantic", "Episodic", "Procedural"]
+                    }
+                }
+            ]
+        }
     }
 
     try:
@@ -221,6 +231,86 @@ def parse_memory(text):
     }
 
 
+def extract_tool_result_text(text):
+    """
+    从 toolResult JSON 中智能提取关键内容。
+    支持：browser、exec、file listing、API response 等多种工具输出。
+    返回提取后的短文本，失败时返回原始 text。
+    """
+    if not text or len(text) > 50000:
+        return text[:MAX_CTX_MSG_LEN] if text else ""
+
+    try:
+        obj = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        # 不是 JSON，直接返回原始文本
+        return text[:MAX_CTX_MSG_LEN] if text else ""
+
+    if not isinstance(obj, dict):
+        return text[:MAX_CTX_MSG_LEN] if text else ""
+
+    # 检测工具类型
+    url = obj.get("finalUrl") or obj.get("url", "")
+    stdout = obj.get("stdout") or obj.get("output") or ""
+    status = obj.get("status", "")
+    error = obj.get("error") or ""
+    content = obj.get("content", "")
+    command = obj.get("command", "")
+    exit_code = obj.get("exit_code", "")
+
+    parts = []
+
+    # browser 工具
+    if url:
+        parts.append(f"→ {url[:100]}")
+
+    # exec 工具
+    if command:
+        parts.append(f"$ {command[:120]}")
+    if stdout:
+        # 过滤掉二进制或超长输出
+        try:
+            stdout_str = str(stdout)
+            if len(stdout_str) > 2000:
+                stdout_str = stdout_str[:2000] + " ..."
+            parts.append(stdout_str)
+        except Exception:
+            pass
+
+    # 简短响应
+    if status and not stdout and not content:
+        parts.append(f"[{status}]")
+
+    # error
+    if error:
+        err_str = str(error)[:200]
+        if err_str not in "".join(parts):
+            parts.append(f"✗ {err_str}")
+
+    # browser 结果的页面内容（content 通常是 HTML/text，简短取前 500 字）
+    if content and url:
+        try:
+            content_str = str(content)
+            if len(content_str) > 500:
+                content_str = content_str[:500] + " ..."
+            parts.append(content_str)
+        except Exception:
+            pass
+
+    # API / file listing / 其他纯 content（无 url）
+    if content and not url:
+        try:
+            content_str = str(content)
+            if len(content_str) > 3000:
+                content_str = content_str[:3000] + " ..."
+            parts.append(content_str)
+        except Exception:
+            pass
+
+    result = " ".join(parts)
+    return result[:MAX_CTX_MSG_LEN] if result else text[:MAX_CTX_MSG_LEN]
+
+
 def lookup_session_snippets(filepath, keyword=None, max_snippets=6):
     """
     读取 session JSONL 文件的完整内容（Step 4 改进）
@@ -258,18 +348,27 @@ def lookup_session_snippets(filepath, keyword=None, max_snippets=6):
 
             content_arr = msg.get("content", [])
             if isinstance(content_arr, list) and content_arr:
-                text = content_arr[0].get("text", "") if isinstance(content_arr[0], dict) else str(content_arr[0])
+                first = content_arr[0]
+                if isinstance(first, dict):
+                    text = first.get("text", "")
+                else:
+                    text = str(first)
             else:
                 text = str(content_arr)
 
             # 跳过 System: 包装的消息
             if text.startswith("System:"):
                 continue
+            # toolResult 走智能提取
+            if role == "toolResult":
+                text = extract_tool_result_text(text)
+            else:
+                text = text[:MAX_CTX_MSG_LEN]
 
             if text:
                 relevant_messages.append({
                     "role": role,
-                    "text": text[:MAX_CTX_MSG_LEN],
+                    "text": text,
                     "icon": role_icon_map[role]
                 })
         except Exception:
