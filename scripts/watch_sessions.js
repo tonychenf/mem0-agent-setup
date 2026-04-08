@@ -104,16 +104,34 @@ function syncFile(filepath) {
   }
   
   // 同步到 Mem0（取最新的10条，而非最老的10条，避免session文件后半部的新消息被丢弃）
-  const messagesJson = JSON.stringify(validMessages.slice(-10));
+  // 但 .reset 文件（session 轮转后）需要同步全部消息，避免早期对话被遗漏
+  const isResetFile = filepath.includes('.reset.');
+  const messagesToSync = isResetFile ? validMessages : validMessages.slice(-10);
+  const messagesJson = JSON.stringify(messagesToSync);
+  
+  // 从 .env 读取真 API key，避免 shell 环境的 fake key 干扰
+  const env = { ...process.env, AGENT_NAME: AGENT_ID };
+  try {
+    const envContent = require('fs').readFileSync('/root/.openclaw/mem0-agent-setup/.env', 'utf-8');
+    for (const line of envContent.split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed && !trimmed.startsWith('#') && trimmed.includes('=')) {
+        const [key, ...rest] = trimmed.split('=');
+        if (key.trim() === 'OPENAI_API_KEY') {
+          env[key.trim()] = rest.join('=').trim();
+        }
+      }
+    }
+  } catch (e) {}
   
   try {
     const result = execSync(
-      `AGENT_NAME=${AGENT_ID} python3 /root/.openclaw/mem0-agent-setup/scripts/sync_to_mem0.py`,
+      `python3 /root/.openclaw/mem0-agent-setup/scripts/sync_to_mem0.py`,
       { 
         encoding: 'utf-8', 
         timeout: 30000,
         input: messagesJson,
-        env: { ...process.env, AGENT_NAME: AGENT_ID }
+        env: env
       }
     );
     

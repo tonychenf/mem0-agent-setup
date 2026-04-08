@@ -9,7 +9,18 @@ import json
 import re
 
 # 配置 API Key（必须设置环境变量）
-if 'OPENAI_API_KEY' not in os.environ:
+# 优先从 .env 加载（解决 shell 环境有假 key 的问题）
+for env_path in ["/root/.openclaw/mem0-agent-setup/.env"]:
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    os.environ[k.strip()] = v.strip()
+        break
+
+if 'OPENAI_API_KEY' not in os.environ or not os.environ.get('OPENAI_API_KEY', '').strip():
     raise RuntimeError("请设置环境变量 OPENAI_API_KEY")
 
 os.environ['OPENAI_BASE_URL'] = os.environ.get('OPENAI_BASE_URL', 'https://api.siliconflow.cn/v1')

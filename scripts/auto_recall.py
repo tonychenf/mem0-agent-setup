@@ -182,6 +182,141 @@ def fetch_recent_realtime(agent, limit=20):
     } for p in realtime_points[:limit]]
 
 
+def search_raw_reset_files(query, agent=None, limit=5):
+    """
+    直接搜索 .reset 文件中的对话内容，作为 Qdrant 的补充。
+    
+    策略：关键词预过滤 → embedding 重排 → 提取最相关的原始对话 block
+    返回格式与 Qdrant 结果一致。
+    """
+    if not query or len(query.strip()) < 2:
+        return []
+    
+    import os, re, json
+    from pathlib import Path
+    from datetime import datetime, timedelta, timezone
+    
+    agent = agent or get_agent_id()
+    sessions_dir = f"/root/.openclaw/agents/{agent}/sessions"
+    
+    # 找最近修改的 20 个 .reset 文件
+    recent_files = []
+    try:
+        p = Path(sessions_dir)
+        all_resets = sorted(p.glob("*.reset.*"), key=lambda f: -f.stat().st_mtime)[:20]
+        recent_files = [(str(f), f.stat().st_mtime) for f in all_resets]
+    except:
+        return []
+    
+    if not recent_files:
+        return []
+    
+    # 关键词预过滤
+    keywords = re.findall(r'[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}', query)
+    if not keywords:
+        keywords = [query.strip()[:10]]
+    
+    # 找包含关键词的文件+消息行
+    file_msg_map = {}
+    for fpath, mtime in recent_files:
+        matches = []
+        try:
+            with open(fpath, encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    line_lower = line.lower()
+                    if any(kw.lower() in line_lower for kw in keywords):
+                        matches.append(line)
+        except:
+            pass
+        if matches:
+            file_msg_map[fpath] = matches[:15]  # 每文件最多15条匹配
+    
+    if not file_msg_map:
+        return []
+    
+    # Embed query（只调一次）
+    try:
+        query_vec = embed_query(query[:200])
+    except Exception:
+        return []
+    
+    def cosine_sim(a, b):
+        dot = sum(x*y for x,y in zip(a,b))
+        n1 = sum(x*x for x in a)**0.5
+        n2 = sum(y*y for y in b)**0.5
+        return dot / (n1 * n2 + 1e-9)
+    
+    # 对每个候选文件，找最相关的消息
+    file_best = []
+    for fpath, lines in file_msg_map.items():
+        best_score = -1
+        best_content = None
+        best_role = None
+        
+        for line in lines[:10]:
+            try:
+                obj = json.loads(line)
+                if obj.get("type") != "message":
+                    continue
+                msg = obj.get("message", {})
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(c.get("text","") for c in content if c.get("type")=="text")
+                if role not in ("user", "assistant") or not content:
+                    continue
+                if content.startswith("System:"):
+                    m = re.search(r'Sender \(untrusted metadata\)[\s\S]+?\n\n([\s\S]+)$', content)
+                    content = (m.group(1) or content).strip() if m else content.strip()
+                else:
+                    content = content.strip()
+                if len(content) < 5:
+                    continue
+                try:
+                    vec = embed_query(content[:300])
+                    score = cosine_sim(vec, query_vec)
+                    if score > best_score:
+                        best_score = score
+                        best_content = content[:400]
+                        best_role = role
+                except:
+                    pass
+            except:
+                pass
+        
+        if best_content and best_score > 0.35:
+            file_best.append({
+                "score": best_score,
+                "file": fpath,
+                "content": best_content,
+                "role": best_role,
+            })
+    
+    if not file_best:
+        return []
+    
+    # 排序取 top limit
+    file_best.sort(key=lambda x: -x["score"])
+    selected = file_best[:limit]
+    
+    results = []
+    for item in selected:
+        block_text = (
+            f"[层级:Episodic][score:{int(item['score']*5)}][distilled]"
+            f"[sessions:1][files:{item['file']}]\n"
+            f"{'User' if item['role']=='user' else 'Assistant'}: {item['content'][:300]}"
+        )
+        parsed = parse_memory(block_text)
+        if parsed:
+            parsed["_payload"] = {"data": block_text, "source": "raw_reset", "file": item["file"]}
+            results.append(parsed)
+    
+    return results
+
+
 def parse_memory(text):
     """
     解析记忆 block，提取层级、分数、文件路径、纯文本
@@ -597,7 +732,7 @@ def auto_recall(query, min_score=DEFAULT_MIN_SCORE, limit=DEFAULT_LIMIT, agent=N
     """
     搜索记忆，按层级分组，扁平输出
 
-    v8: Qdrant 语义搜索 + 最近20条 realtime 追加
+    v9: Qdrant 语义搜索 + 最近20条 realtime 追加 + .reset 文件后备搜索
     - 语义搜索：返回相关度最高的记录（蒸馏+realtime混合）
     - 追加最近20条 realtime：按时序无条件追加
     - 蒸馏按分数过滤，realtime 不过滤
@@ -654,6 +789,18 @@ def auto_recall(query, min_score=DEFAULT_MIN_SCORE, limit=DEFAULT_LIMIT, agent=N
             if parsed_item:
                 parsed_item["_payload"] = payload
                 parsed.append(parsed_item)
+    except:
+        pass  # 出错不影响主流程
+
+    # 追加：直接搜索 .reset 文件中的原始对话（Qdrant 的补充后备）
+    try:
+        raw_results = search_raw_reset_files(query, agent=agent, limit=limit)
+        for item in raw_results:
+            # 去重：跳过 content 相似的
+            item_text = item.get("clean_text", "")[:100]
+            if any(item_text in p.get("clean_text", "")[:100] or p.get("clean_text", "")[:100] in item_text for p in parsed):
+                continue
+            parsed.append(item)
     except:
         pass  # 出错不影响主流程
 
