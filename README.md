@@ -144,16 +144,18 @@ openclaw-memory-enhance/
 │   │                            # 支持 Feishu 格式解析，自动提取真正用户消息
 │   │
 │   │  ── 记忆检索 ──
-│   ├── auto_recall.py           # v8：每次回复前调用，返回格式化记忆
-│   │                            # 语义搜索 + realtime 追加 + session 上下文
+│   ├── auto_recall.py           # v11：每次回复前调用，返回格式化记忆
+│   │                            # 语义搜索（排除realtime） + realtime追加（服务端filter） + 去重
 │   │
 │   │  ── 每日蒸馏 ──
-│   ├── memory_distill_daily.py  # v5：每日 cron 任务
+│   ├── memory_distill_daily.py  # v5：每日 cron 任务（蒸馏前先清理噪音）
 │   │                            # 将原始对话蒸馏为精华 block（LLM 评分 1-5）
 │   │                            # 支持 per-session 断点续传 + 蒸馏记录表
 │   │
 │   │  ── 清理维护 ──
 │   ├── memory_cleanup.py        # 每日 03:00 执行，清理低分记忆
+│   ├── is_noise.py             # 公共噪音判断函数（两处共用）
+│   └── cleanup_noise_realtime.py # 一次性清理噪音记录脚本
 │   │
 │   │  ── 辅助工具 ──
 │   ├── auto_memory.py           # 手动保存单条记忆
@@ -387,9 +389,9 @@ journalctl -u openclaw-session-watch@main -f
 
 ### auto_recall.py
 
-> v8 版本：每次回复前调用的记忆检索脚本。
+> v11 版本：每次回复前调用的记忆检索脚本。
 
-**检索流程**：
+**检索流程（v11）**：
 ```
 用户查询："天王盖地虎是什么意思？"
        ↓
@@ -399,9 +401,10 @@ journalctl -u openclaw-session-watch@main -f
        ↓
 ③ 解析结果：
    - 蒸馏记忆 → 按 score 过滤（< min_score 丢弃）
-   - realtime 记忆 → 不过滤，全量追加
        ↓
-④ 追加最近 20 条 realtime（按时序，不按相关度）
+④ 追加最近 20 条 realtime（服务端 filter：layer=realtime + 24h 时间范围）
+       ↓
+⑤ 去重（id + data 内容双重去重）
        ↓
 ⑤ 按 layer 分组（semantic / episodic / procedural / realtime）
        ↓
@@ -492,6 +495,25 @@ python3 scripts/memory_cleanup.py 30
 ---
 
 ## 📝 更新日志
+
+### v11 (2026-04-17)
+
+**auto_recall.py**：
+- `qdrant_search`：排除 realtime 层（must_not realtime），避免与 realtime 追加重复
+- `fetch_recent_realtime`：scroll 改用服务端 filter（layer=realtime + 时间范围），避免全量扫描漏数据；新增 id+data 双重去重
+- `get_realtime_context`：零向量搜索改为 scroll + 时间排序（零向量无排序意义）
+- 移除 `search_raw_reset_files` 死代码（-136行）
+- 版本号统一为 v11
+
+**sync_to_mem0.py**：
+- 引用 `is_noise.py`，源头过滤 Cron 任务输出、Agent 指令、HEARTBEAT、OpenClaw 内部上下文等噪音
+
+**memory_distill_daily.py**：
+- 新增 `_cleanup_realtime_noise()`，每次蒸馏前自动清理当前 agent collection 中的噪音 realtime 记录
+
+**新增文件**：
+- `is_noise.py`：公共噪音判断函数，两处共用，避免重复维护
+- `cleanup_noise_realtime.py`：一次性清理噪音脚本，支持指定 collection
 
 ### v8 (2026-03-29)
 
@@ -681,17 +703,19 @@ openclaw-memory-enhance/
 │   │                            # Parses Feishu format, extracts real user messages
 │   │
 │   │  ── Memory Retrieval ──
-│   ├── auto_recall.py           # v8: Called before every reply, returns formatted memory
-│   │                            # Semantic search + realtime append + session context
+│   ├── auto_recall.py           # v11: Called before every reply, returns formatted memory
+│   │                            # Semantic search (excludes realtime) + realtime append (server-side filter) + dedup
 │   │
 │   │  ── Daily Distillation ──
-│   ├── memory_distill_daily.py  # v5: Daily cron job
+│   ├── memory_distill_daily.py  # v5: Daily cron job (cleans noise before distilling)
 │   │                            # Distills raw conversations into refined memory blocks
 │   │                            # (LLM scored 1-5)
 │   │                            # Supports per-session checkpoint/resume + distillation log
 │   │
 │   │  ── Cleanup ──
 │   ├── memory_cleanup.py        # Runs at 03:00 daily, cleans low-score memories
+│   ├── is_noise.py             # Shared noise detection function
+│   └── cleanup_noise_realtime.py # One-time noise cleanup utility
 │   │
 │   │  ── Utilities ──
 │   ├── auto_memory.py           # Manually save a single memory
@@ -929,9 +953,9 @@ journalctl -u openclaw-session-watch@main -f
 
 ### auto_recall.py
 
-> v8: Memory retrieval script called before every reply.
+> v11: Memory retrieval script called before every reply.
 
-**Retrieval flow**:
+**Retrieval flow (v11)**:
 ```
 User asks: "What does 天王盖地虎 mean?"
        ↓
@@ -1034,6 +1058,25 @@ python3 scripts/memory_cleanup.py 30
 ---
 
 ## 📝 Changelog
+
+### v11 (2026-04-17)
+
+**auto_recall.py**:
+- `qdrant_search`: excludes realtime layer (must_not realtime), avoids duplication with realtime append
+- `fetch_recent_realtime`: scroll uses server-side filter (layer=realtime + time range), avoids full scan missing data; adds id+data dual dedup
+- `get_realtime_context`: zero-vector search replaced with scroll + time sort (zero vector has no sorting meaning)
+- Removed dead code `search_raw_reset_files` (-136 lines)
+- Version unified as v11
+
+**sync_to_mem0.py**:
+- References `is_noise.py`, filters Cron task output, Agent instructions, HEARTBEAT, OpenClaw internal context at write time
+
+**memory_distill_daily.py**:
+- Added `_cleanup_realtime_noise()`, automatically cleans noisy realtime records before each distillation run
+
+**New files**:
+- `is_noise.py`: shared noise detection function, avoids duplicate maintenance
+- `cleanup_noise_realtime.py`: one-time cleanup utility, supports specified collection
 
 ### v8 (2026-03-29)
 
