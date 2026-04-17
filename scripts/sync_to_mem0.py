@@ -172,6 +172,39 @@ def should_remember_and_score(user_msg: str, assistant_msg: str) -> dict:
     # 默认返回
     return {'should_remember': True, 'score': 3, 'type': 'semantic', 'reason': 'default'}
 
+def is_noise_content(text: str) -> bool:
+    """
+    判断内容是否为噪音（系统/cron/agent指令），这些不值得写入 realtime 层
+    """
+    t = text.strip()
+    
+    # 1. Cron任务输出：包含 [cron:xxx] 标记
+    if '[cron:' in t:
+        return True
+    # 2. Agent指令：短文本 + "你是" + "agent" + "请执行"（纯指令，无实质对话）
+    if len(t) < 400 and '你是' in t and 'agent' in t.lower() and '请执行' in t:
+        return True
+    # 3. Heartbeat
+    if t in ('HEARTBEAT_OK', 'HEARTBEAT_TIMEOUT'):
+        return True
+    # 4. OpenClaw内部上下文泄露
+    if '<<<BEGIN_OPENCLAW' in t:
+        return True
+    if t.startswith('[Internal') or t.startswith('Queued #'):
+        return True
+    # 5. System包装残留（Conversation info / message_id / Sender untrusted metadata）
+    if 'Conversation info' in t and 'message_id' in t:
+        return True
+    # 6. Exec completed 通知
+    if 'Exec completed' in t and len(t) < 600:
+        return True
+    # 7. session reset 文件路径
+    if '.jsonl.reset.' in t:
+        return True
+    
+    return False
+
+
 def sync_messages(messages, agent_name: str = None) -> int:
     """
     同步消息到向量库（带 LLM 筛选）
@@ -219,6 +252,10 @@ def sync_messages(messages, agent_name: str = None) -> int:
                     lines = user.split('\n')
                     content_lines = [l for l in lines if not l.startswith('System:') and not l.startswith('Conversation')]
                     user = ' '.join(content_lines).strip()
+            
+            # 噪音过滤：跳过系统/cron/agent指令类内容
+            if is_noise_content(user):
+                continue
             
             # 过滤：太短的不要（中文短语通常较短，5字符起步）
             if len(user) < 5:

@@ -73,6 +73,58 @@ def get_config():
         "cleanup": args.cleanup,
     }
 
+def _cleanup_realtime_noise(collection):
+    """
+    清理指定 collection 的 realtime 层噪音记录
+    在每天蒸馏前执行，防止噪音干扰蒸馏质量
+    """
+    scroll_url = f'http://localhost:6333/collections/{collection}/points/scroll'
+    delete_url = f'http://localhost:6333/collections/{collection}/points/delete'
+    
+    def is_noise(d):
+        t = d.strip()
+        if '[cron:' in t: return True
+        if len(t) < 400 and '你是' in t and 'agent' in t.lower() and '请执行' in t: return True
+        if t in ('HEARTBEAT_OK', 'HEARTBEAT_TIMEOUT'): return True
+        if '<<<BEGIN_OPENCLAW' in t: return True
+        if t.startswith('[Internal') or t.startswith('Queued #'): return True
+        if 'Conversation info' in t and 'message_id' in t: return True
+        if 'Exec completed' in t and len(t) < 600: return True
+        if '.jsonl.reset.' in t: return True
+        return False
+    
+    all_pts = []
+    offset = None
+    while True:
+        body = {'limit': 100, 'offset': offset, 'with_payload': True, 'with_vectors': False,
+                'filter': {'must': [{'key': 'layer', 'match': {'value': 'realtime'}}]}}
+        try:
+            r = requests.post(scroll_url, headers={'Content-Type': 'application/json'}, json=body, timeout=10)
+            result = r.json()
+            if result.get('status') != 'ok': break
+            pts = result.get('result', {}).get('points', [])
+            if not pts: break
+            all_pts.extend(pts)
+            offset = result.get('result', {}).get('next_page_offset')
+            if offset is None: break
+        except: break
+    
+    noisy = [p['id'] for p in all_pts if is_noise(p['payload'].get('data', ''))]
+    if not noisy:
+        print(f'[Cleanup] {collection}: 无噪音需要清理')
+        return
+    
+    deleted = 0
+    for i in range(0, len(noisy), 50):
+        batch = noisy[i:i+50]
+        try:
+            r = requests.post(delete_url, headers={'Content-Type': 'application/json'}, json={'points': batch}, timeout=10)
+            if r.json().get('status') == 'ok':
+                deleted += len(batch)
+        except: pass
+    print(f'[Cleanup] {collection}: 清理了 {deleted}/{len(noisy)} 条噪音')
+
+
 def get_state_path(cfg):
     state_file = cfg["state_file"]
     state_dir = os.path.dirname(state_file)
@@ -568,6 +620,12 @@ def main():
 
     print(f"[Agent: {agent}] Collection: {collection}  Sessions: {sessions_dir}")
     print(f"[State] {state_file}")
+
+    # v5: 清理 realtime 层噪音（Cron任务、Agent指令等）
+    try:
+        _cleanup_realtime_noise(collection)
+    except Exception as e:
+        print(f'[Cleanup] 噪音清理失败: {e}')
 
     # v5: 确保记录表存在
     ensure_record_collection()
