@@ -1,24 +1,49 @@
 #!/usr/bin/env node
 /**
- * Session Directory Watcher
+ * Session Directory Watcher - 增强版
  * 
- * 监听 sessions 目录变化，自动同步新对话到 Mem0
+ * 改进：
+ * 1. 文件删除检测：检测到 session 文件消失时，立即尝试读取并同步
+ * 2. Pre-reset 触发器：检测到 /tmp/.pre_reset_sync.{agent} 文件时，执行全量同步
+ * 3. 更快轮询：发现变化时自动加速轮询
  * 
  * 用法: node scripts/watch_sessions.js [agentId]
- * 
- * 支持的 agent: main, capital, dev, legal, ops 等
  */
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
 
 const AGENT_ID = process.argv[2] || 'main';
 const SESSIONS_DIR = `/root/.openclaw/agents/${AGENT_ID}/sessions`;
-const WATCH_INTERVAL = 5000; // 每5秒检查一次
+const BASE_INTERVAL = 5000;        // 基础轮询间隔
+const FAST_INTERVAL = 500;         // 加速轮询间隔（检测到变化后）
+const FAST_DURATION = 10000;       // 加速持续时间
+const PRE_RESET_FILE = `/tmp/.pre_reset_sync.${AGENT_ID}`;
 
-// 记录已处理的文件
-const processedFiles = new Set();
+let pollInterval = BASE_INTERVAL;
+let lastChangeTime = 0;
+
+// 记录已处理的文件：filepath -> {size, mtime, deleted}
+// deleted=true 表示文件已被删除但尚未处理
+const fileStates = new Map();
+
+// 从 .env 加载环境变量
+function loadEnv() {
+  const env = { ...process.env, AGENT_NAME: AGENT_ID };
+  try {
+    const envContent = fs.readFileSync('/root/.openclaw/mem0-agent-setup/.env', 'utf-8');
+    for (const line of envContent.split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed && !trimmed.startsWith('#') && trimmed.includes('=')) {
+        const [key, ...rest] = trimmed.split('=');
+        if (key.trim() === 'OPENAI_API_KEY') {
+          env[key.trim()] = rest.join('=').trim();
+        }
+      }
+    }
+  } catch (e) {}
+  return env;
+}
 
 // 获取所有 session 文件
 function getSessionFiles() {
@@ -30,17 +55,17 @@ function getSessionFiles() {
 }
 
 // 同步单个文件到 Mem0
-function syncFile(filepath) {
-  if (processedFiles.has(filepath)) {
-    return 0;
+function syncFile(filepath, isUrgent = false) {
+  // 尝试读取文件内容（即使已被删除，如果 inode 还在就能读到）
+  let content;
+  try {
+    content = fs.readFileSync(filepath, 'utf-8');
+  } catch (e) {
+    // 文件真的没了（inode 已释放），无法恢复
+    return -1;
   }
   
-  const { execSync } = require('child_process');
-  
-  // 解析文件
-  const content = fs.readFileSync(filepath, 'utf-8');
   const lines = content.trim().split('\n');
-  
   let messages = [];
   let currentUserMsg = null;
   
@@ -66,7 +91,6 @@ function syncFile(filepath) {
       
       if (role === 'user' && text.length > 20) {
         let userMsg = text;
-        // 新格式: System: [...] + Conversation info + Sender info + 真实消息
         if (text.startsWith('System:')) {
           const senderMatch = text.match(/Sender \(untrusted metadata\):[\s\S]+?\n\n([\s\S]+)$/);
           if (senderMatch && senderMatch[1] && senderMatch[1].trim().length > 0) {
@@ -87,7 +111,6 @@ function syncFile(filepath) {
   }
   
   if (messages.length === 0) {
-    processedFiles.add(filepath);
     return 0;
   }
   
@@ -99,33 +122,18 @@ function syncFile(filepath) {
   );
   
   if (validMessages.length === 0) {
-    processedFiles.add(filepath);
     return 0;
   }
   
-  // 同步到 Mem0（取最新的10条，而非最老的10条，避免session文件后半部的新消息被丢弃）
-  // 但 .reset 文件（session 轮转后）需要同步全部消息，避免早期对话被遗漏
+  // 重要：reset 文件同步全部消息；普通文件同步最后 10 条
   const isResetFile = filepath.includes('.reset.');
   const messagesToSync = isResetFile ? validMessages : validMessages.slice(-10);
   const messagesJson = JSON.stringify(messagesToSync);
   
-  // 从 .env 读取真 API key，避免 shell 环境的 fake key 干扰
-  const env = { ...process.env, AGENT_NAME: AGENT_ID };
-  try {
-    const envContent = require('fs').readFileSync('/root/.openclaw/mem0-agent-setup/.env', 'utf-8');
-    for (const line of envContent.split('\n')) {
-      const trimmed = line.trim();
-      if (trimmed && !trimmed.startsWith('#') && trimmed.includes('=')) {
-        const [key, ...rest] = trimmed.split('=');
-        if (key.trim() === 'OPENAI_API_KEY') {
-          env[key.trim()] = rest.join('=').trim();
-        }
-      }
-    }
-  } catch (e) {}
+  const env = loadEnv();
   
   try {
-    const result = execSync(
+    const result = require('child_process').execSync(
       `python3 /root/.openclaw/mem0-agent-setup/scripts/sync_to_mem0.py`,
       { 
         encoding: 'utf-8', 
@@ -137,7 +145,9 @@ function syncFile(filepath) {
     
     if (result.includes('DONE:')) {
       const count = parseInt(result.split('DONE:')[1]);
-      processedFiles.add(filepath);
+      if (isUrgent) {
+        console.log(`[${new Date().toISOString()}] [URGENT] ${AGENT_ID}: +${count} 条 -> ${path.basename(filepath)} (${isResetFile ? 'full' : 'last10'})`);
+      }
       return count;
     }
   } catch (e) {
@@ -147,36 +157,122 @@ function syncFile(filepath) {
   return 0;
 }
 
-// 检查并同步
-function checkAndSync() {
+// 全量同步：同步所有已知文件（用于 pre-reset 触发）
+function syncAllFiles(urgent = false) {
   const files = getSessionFiles();
+  let total = 0;
   
   for (const file of files) {
     const filepath = path.join(SESSIONS_DIR, file);
+    const added = syncFile(filepath, urgent);
+    if (added > 0) total += added;
+  }
+  
+  // 也尝试同步那些已被删除但可能还有 inode 的文件
+  for (const [filepath, state] of fileStates) {
+    if (state.deleted) {
+      const added = syncFile(filepath, urgent);
+      if (added > 0) total += added;
+    }
+  }
+  
+  return total;
+}
+
+// 检查 pre-reset 触发器
+function checkPreResetTrigger() {
+  if (fs.existsSync(PRE_RESET_FILE)) {
+    console.log(`[${new Date().toISOString()}] [PRE-RESET] 检测到重置触发器，执行全量同步...`);
+    const count = syncAllFiles(true);
+    console.log(`[${new Date().toISOString()}] [PRE-RESET] 完成: ${count} 条消息已同步`);
+    try {
+      fs.unlinkSync(PRE_RESET_FILE);
+      console.log(`[${new Date().toISOString()}] [PRE-RESET] 触发器已清除`);
+    } catch (e) {}
+    return true;
+  }
+  return false;
+}
+
+// 主检查函数
+function checkAndSync() {
+  // 1. 检查 pre-reset 触发器
+  checkPreResetTrigger();
+  
+  // 2. 检测文件变化
+  const files = getSessionFiles();
+  const currentFiles = new Set(files);
+  
+  let hasChanges = false;
+  
+  // 2a. 检查现有文件的变化
+  for (const file of files) {
+    const filepath = path.join(SESSIONS_DIR, file);
     
-    // 检查文件是否有新内容（文件大小变化）
     try {
       const stats = fs.statSync(filepath);
-      const fileKey = `${filepath}:${stats.size}`;
+      const state = fileStates.get(filepath);
       
-      if (!processedFiles.has(fileKey)) {
+      if (!state) {
+        // 新文件
+        fileStates.set(filepath, { size: stats.size, mtime: stats.mtimeMs, deleted: false });
         const added = syncFile(filepath);
         if (added > 0) {
           console.log(`[${new Date().toISOString()}] ${AGENT_ID}: +${added} 条 -> ${file}`);
+          hasChanges = true;
         }
-        // 记录文件大小
-        processedFiles.add(fileKey);
+      } else if (state.size !== stats.size || state.mtime !== stats.mtimeMs) {
+        // 文件有变化
+        fileStates.set(filepath, { size: stats.size, mtime: stats.mtimeMs, deleted: false });
+        const added = syncFile(filepath);
+        if (added > 0) {
+          console.log(`[${new Date().toISOString()}] ${AGENT_ID}: +${added} 条 -> ${file} [updated]`);
+          hasChanges = true;
+        }
       }
-    } catch (e) {}
+    } catch (e) {
+      // 文件读取失败
+    }
+  }
+  
+  // 2b. 检测被删除的文件（Session Reset）
+  // 如果一个之前存在的文件现在不见了，说明发生了 session reset
+  for (const [filepath, state] of fileStates) {
+    const basename = path.basename(filepath);
+    if (!currentFiles.has(basename) && !state.deleted) {
+      console.log(`[${new Date().toISOString()}] [RESET DETECTED] 检测到文件消失: ${basename}`);
+      // 文件被删除前可能还有内容没同步，尝试紧急同步
+      fileStates.set(filepath, { ...state, deleted: true });
+      const added = syncFile(filepath, true); // urgent=true
+      if (added > 0) {
+        console.log(`[${new Date().toISOString()}] [RESET RECOVERED] 恢复 ${added} 条消息 from ${basename}`);
+        hasChanges = true;
+      } else {
+        console.log(`[${new Date().toISOString()}] [RESET] ${basename} 无法恢复（内容可能已丢失）`);
+      }
+    }
+  }
+  
+  // 3. 加速轮询：如果有变化，加速轮询一段时间
+  if (hasChanges) {
+    lastChangeTime = Date.now();
+    if (pollInterval !== FAST_INTERVAL) {
+      pollInterval = FAST_INTERVAL;
+      console.log(`[${new Date().toISOString()}] [SPEED UP] 切换到快速轮询 (${FAST_INTERVAL}ms)`);
+    }
+  } else if (Date.now() - lastChangeTime > FAST_DURATION && pollInterval !== BASE_INTERVAL) {
+    pollInterval = BASE_INTERVAL;
+    console.log(`[${new Date().toISOString()}] [SLOW DOWN] 恢复基础轮询 (${BASE_INTERVAL}ms)`);
   }
 }
 
 // 主函数
 function main() {
-  console.log(`=== Session Watcher ===`);
+  console.log(`=== Session Watcher (增强版) ===`);
   console.log(`Agent: ${AGENT_ID}`);
   console.log(`Watching: ${SESSIONS_DIR}`);
-  console.log(`Interval: ${WATCH_INTERVAL}ms`);
+  console.log(`Base Interval: ${BASE_INTERVAL}ms`);
+  console.log(`Pre-reset trigger: ${PRE_RESET_FILE}`);
   console.log('');
   
   if (!fs.existsSync(SESSIONS_DIR)) {
@@ -184,24 +280,33 @@ function main() {
     process.exit(1);
   }
   
-  // 初始化：处理现有文件
+  // 初始化：扫描现有文件
   console.log('Initial scan...');
   const files = getSessionFiles();
   console.log(`Found ${files.length} session files`);
   
-  // 标记所有现有文件为已处理（只监控新内容）
   for (const file of files) {
     const filepath = path.join(SESSIONS_DIR, file);
     try {
       const stats = fs.statSync(filepath);
-      processedFiles.add(`${filepath}:${stats.size}`);
+      fileStates.set(filepath, { size: stats.size, mtime: stats.mtimeMs, deleted: false });
     } catch (e) {}
   }
   
-  console.log('Watching for new messages...\n');
+  console.log('Watching for changes...\n');
+  
+  // 立即执行一次同步（包括 pre-reset 检查）
+  checkAndSync();
   
   // 定期检查
-  setInterval(checkAndSync, WATCH_INTERVAL);
+  setInterval(checkAndSync, pollInterval);
+  
+  // 动态调整轮询间隔
+  setInterval(() => {
+    if (pollInterval !== BASE_INTERVAL) {
+      checkAndSync();
+    }
+  }, pollInterval);
 }
 
 main();

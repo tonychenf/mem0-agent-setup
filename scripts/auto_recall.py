@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-auto_recall - 自动记忆读取（v8）
+auto_recall - 自动记忆读取（v11）
 设计目标：
 - 分组扁平输出：每层定义出现一次，block 用 | 分隔
 - 严谨性：边界条件，空值、异常全面处理
 - 可拓展性：层级定义外部化、输出格式可配置、session 上下文策略可扩展
-- v8: Step 4完整session + Step 5 realtime
+- v11: 修复 scroll 500条限制，改用服务端 filter；get_realtime_context 零向量改为 scroll+时间排序；移除死代码 search_raw_reset_files
   - Step 4: 加载整个 session 文件（无 keyword 匹配）
   - Step 5: 加载当前 session + 24h 内 realtime 对话
 """
@@ -114,13 +114,8 @@ def qdrant_search(vec, agent, limit=8):
         "limit": limit,
         "with_payload": True,
         "filter": {
-            "must": [
-                {
-                    "key": "layer",
-                    "match": {
-                        "any": ["Semantic", "semantic", "Episodic", "Procedural", "realtime"]
-                    }
-                }
+            "must_not": [
+                {"key": "layer", "match": {"any": ["realtime", "Realtime"]}}
             ]
         }
     }
@@ -135,18 +130,35 @@ def qdrant_search(vec, agent, limit=8):
         raise RuntimeError(f"Qdrant search 失败: {e}")
 
 
-def fetch_recent_realtime(agent, limit=20):
+def fetch_recent_realtime(agent, limit=20, hours=24):
     """
     获取最近 N 条 realtime 记录（按时序，不走向量搜索）
+    只返回最近 hours 小时内的记录，且 data 必须以 [realtime] 开头（真正的实时内容）
+    使用服务端 filter 避免全量扫描
     """
+    from datetime import datetime, timedelta, timezone
     collection = f"mem0_{agent}"
     url = f"http://localhost:6333/collections/{collection}/points/scroll"
+
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(hours=hours)).isoformat()
 
     all_points = []
     offset = None
     
-    while len(all_points) < 500:  # 最多扫500条
-        body = {"limit": 100, "offset": offset, "with_payload": True, "with_vectors": False}
+    # 服务端过滤：只取 layer=realtime 的记录，大幅减少扫描量
+    while len(all_points) < 500:
+        body = {
+            "limit": 100,
+            "offset": offset,
+            "with_payload": True,
+            "with_vectors": False,
+            "filter": {
+                "must": [
+                    {"key": "layer", "match": {"value": "realtime"}}
+                ]
+            }
+        }
         try:
             resp = requests.post(url, headers={"Content-Type": "application/json"}, json=body)
             result = resp.json()
@@ -159,163 +171,33 @@ def fetch_recent_realtime(agent, limit=20):
             offset = result.get("result", {}).get("next_page_offset")
             if offset is None:
                 break
-        except:
+        except Exception as e:
             break
 
-    # 过滤 realtime（没有 [层级: 和 [distilled] 标签的）
-    # realtime 格式：[realtime][score:N] 内容
-    realtime_points = []
+    # 二次过滤：data 必须以 [realtime] 开头（防旧数据 bug）+ 时间过滤
+    # 按 created_at 倒序取 top limit
+    filtered = []
     for p in all_points:
         data = p.get("payload", {}).get("data", "")
-        if "[层级:" in data or "[distilled]" in data:
-            continue  # 跳过蒸馏数据
-        if re.search(r"\[(semantic|episodic|procedural)\]", data, re.IGNORECASE):
-            continue  # 跳过带层级标签的同步数据
-        realtime_points.append(p)
+        if not data.startswith("[realtime]"):
+            continue
+        created_at = p.get("payload", {}).get("created_at", "")
+        if created_at < cutoff:
+            continue
+        filtered.append(p)
 
-    # 按 created_at 倒序，取最近 limit 条
-    realtime_points.sort(key=lambda p: p.get("payload", {}).get("created_at", ""), reverse=True)
-    
-    return [{
-        "id": p.get("id"),
-        "payload": p.get("payload", {})
-    } for p in realtime_points[:limit]]
+    filtered.sort(key=lambda p: p.get("payload", {}).get("created_at", ""), reverse=True)
 
-
-def search_raw_reset_files(query, agent=None, limit=5):
-    """
-    直接搜索 .reset 文件中的对话内容，作为 Qdrant 的补充。
+    # 去重：按 id + data 内容双重去重（避免同 id 不同版本重复）
+    seen = set()
+    result = []
+    for p in filtered[:limit]:
+        key = (p.get("id"), p.get("payload", {}).get("data", "")[:80])
+        if key not in seen:
+            seen.add(key)
+            result.append({"id": p.get("id"), "payload": p.get("payload", {})})
     
-    策略：关键词预过滤 → embedding 重排 → 提取最相关的原始对话 block
-    返回格式与 Qdrant 结果一致。
-    """
-    if not query or len(query.strip()) < 2:
-        return []
-    
-    import os, re, json
-    from pathlib import Path
-    from datetime import datetime, timedelta, timezone
-    
-    agent = agent or get_agent_id()
-    sessions_dir = f"/root/.openclaw/agents/{agent}/sessions"
-    
-    # 找最近修改的 20 个 .reset 文件
-    recent_files = []
-    try:
-        p = Path(sessions_dir)
-        all_resets = sorted(p.glob("*.reset.*"), key=lambda f: -f.stat().st_mtime)[:20]
-        recent_files = [(str(f), f.stat().st_mtime) for f in all_resets]
-    except:
-        return []
-    
-    if not recent_files:
-        return []
-    
-    # 关键词预过滤
-    keywords = re.findall(r'[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}', query)
-    if not keywords:
-        keywords = [query.strip()[:10]]
-    
-    # 找包含关键词的文件+消息行
-    file_msg_map = {}
-    for fpath, mtime in recent_files:
-        matches = []
-        try:
-            with open(fpath, encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    line_lower = line.lower()
-                    if any(kw.lower() in line_lower for kw in keywords):
-                        matches.append(line)
-        except:
-            pass
-        if matches:
-            file_msg_map[fpath] = matches[:15]  # 每文件最多15条匹配
-    
-    if not file_msg_map:
-        return []
-    
-    # Embed query（只调一次）
-    try:
-        query_vec = embed_query(query[:200])
-    except Exception:
-        return []
-    
-    def cosine_sim(a, b):
-        dot = sum(x*y for x,y in zip(a,b))
-        n1 = sum(x*x for x in a)**0.5
-        n2 = sum(y*y for y in b)**0.5
-        return dot / (n1 * n2 + 1e-9)
-    
-    # 对每个候选文件，找最相关的消息
-    file_best = []
-    for fpath, lines in file_msg_map.items():
-        best_score = -1
-        best_content = None
-        best_role = None
-        
-        for line in lines[:10]:
-            try:
-                obj = json.loads(line)
-                if obj.get("type") != "message":
-                    continue
-                msg = obj.get("message", {})
-                role = msg.get("role", "")
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    content = " ".join(c.get("text","") for c in content if c.get("type")=="text")
-                if role not in ("user", "assistant") or not content:
-                    continue
-                if content.startswith("System:"):
-                    m = re.search(r'Sender \(untrusted metadata\)[\s\S]+?\n\n([\s\S]+)$', content)
-                    content = (m.group(1) or content).strip() if m else content.strip()
-                else:
-                    content = content.strip()
-                if len(content) < 5:
-                    continue
-                try:
-                    vec = embed_query(content[:300])
-                    score = cosine_sim(vec, query_vec)
-                    if score > best_score:
-                        best_score = score
-                        best_content = content[:400]
-                        best_role = role
-                except:
-                    pass
-            except:
-                pass
-        
-        if best_content and best_score > 0.35:
-            file_best.append({
-                "score": best_score,
-                "file": fpath,
-                "content": best_content,
-                "role": best_role,
-            })
-    
-    if not file_best:
-        return []
-    
-    # 排序取 top limit
-    file_best.sort(key=lambda x: -x["score"])
-    selected = file_best[:limit]
-    
-    results = []
-    for item in selected:
-        block_text = (
-            f"[层级:Episodic][score:{int(item['score']*5)}][distilled]"
-            f"[sessions:1][files:{item['file']}]\n"
-            f"{'User' if item['role']=='user' else 'Assistant'}: {item['content'][:300]}"
-        )
-        parsed = parse_memory(block_text)
-        if parsed:
-            parsed["_payload"] = {"data": block_text, "source": "raw_reset", "file": item["file"]}
-            results.append(parsed)
-    
-    return results
-
+    return result
 
 def parse_memory(text):
     """
@@ -599,43 +481,61 @@ def get_realtime_context(agent, max_msgs=30):
             contexts.append("\n".join(ctx_lines[:max_msgs + 1]))
 
     # 2. Qdrant 中最近 24h 的 realtime 数据（排除蒸馏 blocks）
+    # 用 scroll + 服务端 filter 替代零向量搜索（零向量搜索无排序意义）
     collection = f"mem0_{agent}"
-    zero_vec = [0.0] * 1024
-    url = f"http://localhost:6333/collections/{collection}/points/search"
+    scroll_url = f"http://localhost:6333/collections/{collection}/points/scroll"
 
-    body = {
-        "vector": zero_vec,
-        "limit": 20,
-        "filter": {
-            "must": [
-                {"key": "agent_id", "match": {"any": [agent]}},
-                {"key": "role", "match": {"any": ["user", "assistant"]}}
-            ]
-        },
-        "with_payload": True
-    }
+    all_pts = []
+    offset = None
+    while len(all_pts) < 200:
+        body = {
+            "limit": 50,
+            "offset": offset,
+            "with_payload": True,
+            "with_vectors": False,
+            "filter": {
+                "must": [
+                    {"key": "layer", "match": {"value": "realtime"}},
+                    {"key": "created_at", "range": {"gte": delta.isoformat()}}
+                ]
+            }
+        }
+        try:
+            resp = requests.post(scroll_url, headers={"Content-Type": "application/json"}, json=body)
+            result = resp.json()
+            if result.get("status") != "ok":
+                break
+            pts = result.get("result", {}).get("points", [])
+            if not pts:
+                break
+            all_pts.extend(pts)
+            offset = result.get("result", {}).get("next_page_offset")
+            if offset is None:
+                break
+        except Exception:
+            break
 
-    try:
-        resp = requests.post(url, headers={"Content-Type": "application/json"}, json=body)
-        result = resp.json()
-        if result.get("status") == "ok":
-            pts = result.get("result", [])
-            # 过滤：排除含 [层级:] 的蒸馏 blocks
-            realtime_msgs = []
-            for p in pts:
-                pl = p.get("payload", {})
-                data = pl.get("data", "")
-                # 排除蒸馏 blocks（含有 [层级: 或 [semantic] 等标记）
-                if "[层级:" in data or "[semantic]" in data.lower() or "[episodic]" in data.lower() or "[procedural]" in data.lower():
-                    continue
-                role = pl.get("role", "")
-                icon = {"user": "👤", "assistant": "🤖"}.get(role, "📄")
-                realtime_msgs.append(f"{icon} {data[:MAX_CTX_MSG_LEN]}")
-
-            if realtime_msgs:
-                contexts.append("[Qdrant 24h]\n" + "\n".join(realtime_msgs[:max_msgs]))
-    except Exception:
-        pass
+    if all_pts:
+        # 按 created_at 倒序，取最新消息
+        all_pts.sort(key=lambda p: p.get("payload", {}).get("created_at", ""), reverse=True)
+        realtime_msgs = []
+        seen = set()
+        for p in all_pts:
+            pl = p.get("payload", {})
+            data = pl.get("data", "")
+            # data 必须以 [realtime] 开头才是真正的实时内容
+            if not data.startswith("[realtime]"):
+                continue
+            # 去重
+            key = data[:80]
+            if key in seen:
+                continue
+            seen.add(key)
+            role = pl.get("role", "")
+            icon = {"user": "👤", "assistant": "🤖"}.get(role, "📄")
+            realtime_msgs.append(f"{icon} {data[:MAX_CTX_MSG_LEN]}")
+        if realtime_msgs:
+            contexts.append("[Qdrant 24h]\n" + "\n".join(realtime_msgs[:max_msgs]))
 
     return contexts
 
@@ -732,10 +632,10 @@ def auto_recall(query, min_score=DEFAULT_MIN_SCORE, limit=DEFAULT_LIMIT, agent=N
     """
     搜索记忆，按层级分组，扁平输出
 
-    v9: Qdrant 语义搜索 + 最近20条 realtime 追加 + .reset 文件后备搜索
-    - 语义搜索：返回相关度最高的记录（蒸馏+realtime混合）
-    - 追加最近20条 realtime：按时序无条件追加
-    - 蒸馏按分数过滤，realtime 不过滤
+    v10: Qdrant 语义搜索（排除realtime）+ 最近N条 realtime 追加
+    - qdrant_search：返回相关度最高的蒸馏记忆（semantic/episodic/procedural）
+    - fetch_recent_realtime：只追加真正 realtime 格式（layer=realtime 且 data 以 [realtime] 开头）的最近记录
+    - session 上下文由 get_session_context 自动补全（.reset 文件内容作为块内上下文）
 
     Args:
         query: 搜索关键词
@@ -782,25 +682,13 @@ def auto_recall(query, min_score=DEFAULT_MIN_SCORE, limit=DEFAULT_LIMIT, agent=N
             text = payload.get("data", "")
             if not text:
                 continue
-            # 去重：跳过已在语义搜索结果中的
+            # 去重：跳过 ID 已在 qdrant_search 结果中的
             if any(p.get("_payload", {}).get("id") == rp.get("id") for p in parsed):
                 continue
             parsed_item = parse_memory(text)
             if parsed_item:
                 parsed_item["_payload"] = payload
                 parsed.append(parsed_item)
-    except:
-        pass  # 出错不影响主流程
-
-    # 追加：直接搜索 .reset 文件中的原始对话（Qdrant 的补充后备）
-    try:
-        raw_results = search_raw_reset_files(query, agent=agent, limit=limit)
-        for item in raw_results:
-            # 去重：跳过 content 相似的
-            item_text = item.get("clean_text", "")[:100]
-            if any(item_text in p.get("clean_text", "")[:100] or p.get("clean_text", "")[:100] in item_text for p in parsed):
-                continue
-            parsed.append(item)
     except:
         pass  # 出错不影响主流程
 
